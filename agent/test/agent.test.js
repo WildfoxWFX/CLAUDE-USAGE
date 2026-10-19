@@ -50,7 +50,10 @@ function once(col, fx, stateDir, extra, args) {
 
 test('parseLine keeps usage lines of Claude models and nothing else', () => {
   const r = A.parseLine(line({ usage: { input_tokens: 5, output_tokens: 6, cache_creation_input_tokens: 7, cache_read_input_tokens: 8 }, cw1h: 3 }));
-  assert.deepEqual(r, { key: 'msg_1:req_1', ms: Date.parse('2026-10-18T10:00:00.000Z'), model: 'claude-sonnet-5-5', in: 5, out: 6, cw: 7, cr: 8, cw1h: 3, session: 'sess-A' });
+  assert.deepEqual(r, { key: 'msg_1', ms: Date.parse('2026-10-18T10:00:00.000Z'), model: 'claude-sonnet-5-5', in: 5, out: 6, cw: 7, cr: 8, cw1h: 3, session: 'sess-A' });
+  assert.equal(A.parseLine(line({ id: 'gw-1', rid: 'r9' })).key, 'gw-1:r9', 'a gateway id is scoped by request');
+  assert.equal(A.parseLine(line({ usage: { speed: 'fast' } })).model, 'claude-sonnet-5-5-fast');
+  assert.equal(A.parseLine(line({ usage: { speed: 'standard' } })).model, 'claude-sonnet-5-5');
   assert.equal(A.parseLine(line({ model: '<synthetic>' })), null);
   assert.equal(A.parseLine(line({ model: 'gpt-4o' })), null);
   assert.equal(A.parseLine(line({ err: true })), null);
@@ -66,6 +69,13 @@ test('parseLine keeps usage lines of Claude models and nothing else', () => {
   assert.equal(A.parseLine(line({ usage: { input_tokens: '12' } })).in, 12, 'numbers in strings are accepted');
   assert.equal(A.parseLine(line({ usage: { input_tokens: -4 } })).in, 0);
   assert.equal(A.parseLine(line({ session: '' })).session, '');
+  /* the session ledger */
+  const ledger = JSON.stringify({ type: 'cost-state', sessionId: 'sess-A', totalCostUSD: 1.5, modelUsage: { 'claude-sonnet-5-5': { inputTokens: 10, outputTokens: 5000, thinkingTokens: 100, cacheReadInputTokens: 300, cacheCreationInputTokens: 200, costUSD: 1.4 }, 'claude-haiku-5-5': { inputTokens: '7', outputTokens: 8 }, 'gpt-4': { inputTokens: 1, outputTokens: 1 } } });
+  assert.deepEqual(A.parseLedger(ledger), { session: 'sess-A', models: { 'claude-sonnet-5-5': [10, 5000, 200, 300], 'claude-haiku-5-5': [7, 8, 0, 0] } });
+  assert.equal(A.parseLedger(JSON.stringify({ type: 'cost-state', sessionId: 's', modelUsage: {} })), null);
+  assert.equal(A.parseLedger(JSON.stringify({ type: 'cost-state', modelUsage: { 'claude-x': {} } })), null);
+  assert.equal(A.parseLedger('{"type":"cost-state"'), null);
+  assert.equal(A.parseLedger(line({})), null);
 });
 
 test('readFrom reads complete lines from an offset and leaves a partial line for later', () => {
@@ -174,6 +184,71 @@ test('--once fails clearly without a collector and keeps the data for the next t
   assert.equal(state.dirtyDays.length, 2); assert.equal(state.fails, 1); assert.ok(state.nextTry > Date.now());
   const r2 = spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, { USAGE_KEY: 'k', USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st }), encoding: 'utf8' });
   assert.equal(r2.status, 2); assert.match(r2.stderr, /Set USAGE_URL and USAGE_KEY/);
+});
+
+test('logs are read from every root like ccusage: ~/.claude, ~/.config/claude, or a comma-separated list', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'));
+  const mk = (sub, name, out) => { const d = path.join(home, sub, 'projects', 'p'); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 's.jsonl'), line({ id: 'msg_' + name, rid: 'r' + name, usage: { input_tokens: 1, output_tokens: out, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 }) + '\n'); };
+  mk('.claude', 'a', 10); mk(path.join('.config', 'claude'), 'b', 20); mk('other1', 'c', 30); mk('other2', 'd', 40);
+  try {
+    let r = spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: '', USAGE_CLAUDE_DIR: '', USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'x', USAGE_HOST: 'H', USAGE_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'st-')) }), encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /Scanned 2 log files, 2 new API calls/);
+    let u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u.members[0].rows[0][3], 30, 'both default roots counted');
+    r = spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, { HOME: home, USAGE_CLAUDE_DIR: path.join(home, 'other1') + ', ' + path.join(home, 'other2', 'projects'), USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'y', USAGE_HOST: 'H', USAGE_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'st-')) }), encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u.members.find((m) => m.id === 'y@h').rows[0][3], 70, 'a root may be the config dir or the projects dir itself');
+  } finally { await col.stop(); }
+});
+
+test('a response that streams past midnight is counted on the day it started; fast mode is its own model', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), p = path.join(dir, 'projects', 'p'); fs.mkdirSync(p, { recursive: true });
+  const st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  const first = line({ id: 'msg_x', rid: 'req_x', ts: '2026-10-17T23:59:50.000Z', usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 });
+  const last = line({ id: 'msg_x', rid: 'req_x', ts: '2026-10-18T00:00:40.000Z', usage: { input_tokens: 10, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 });
+  const fast = line({ id: 'msg_f', rid: 'req_f', ts: '2026-10-18T01:00:00.000Z', model: 'claude-opus-5-5', usage: { input_tokens: 1000000, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, speed: 'fast' }, cw1h: 0 });
+  fs.writeFileSync(path.join(p, 's.jsonl'), first + '\n');
+  try {
+    const env2 = Object.assign({}, process.env, { USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'z', USAGE_HOST: 'H', USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: st });
+    assert.equal(spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' }).status, 0);
+    fs.appendFileSync(path.join(p, 's.jsonl'), last + '\n' + fast + '\n');
+    assert.equal(spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' }).status, 0);
+    const rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[1], x[2], x[3], x[6]]), [['2026-10-17', 'claude-sonnet-5-5', 10, 50, (10 * 2 + 50 * 10) / 1e6], ['2026-10-18', 'claude-opus-5-5-fast', 1000000, 0, 8]]);
+  } finally { await col.stop(); }
+});
+
+test('Claude Code\u2019s session ledger lifts the understated output tokens, shared over the session\u2019s days', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), p = path.join(dir, 'projects', 'p'); fs.mkdirSync(p, { recursive: true });
+  const rec = (id, ts, out) => line({ id: 'msg_' + id, rid: 'req_' + id, ts, usage: { input_tokens: 10, output_tokens: out, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000 }, cw1h: 0 });
+  const ledger = (out, cr) => JSON.stringify({ type: 'cost-state', sessionId: 'sess-A', modelUsage: { 'claude-sonnet-5-5': { inputTokens: 30, outputTokens: out, cacheReadInputTokens: cr, cacheCreationInputTokens: 300, costUSD: 1 } } });
+  /* 3 records: 10 output on the 17th, 20 + 10 on the 18th; the ledger says 3000 output and 3300 cache reads */
+  fs.writeFileSync(path.join(p, 's.jsonl'), [rec('a', '2026-10-17T10:00:00.000Z', 10), rec('b', '2026-10-18T10:00:00.000Z', 20), rec('c', '2026-10-18T11:00:00.000Z', 10), ledger(3000, 3300)].join('\n') + '\n');
+  const run = (extra) => spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, { USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'l', USAGE_HOST: 'H', USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'st-')) }, extra || {}), encoding: 'utf8' });
+  try {
+    let r = run(); assert.equal(r.status, 0, r.stdout + r.stderr);
+    let u = (await H.get(col.url + '/api/usage' + K)).json;
+    const rows = u.members.find((m) => m.id === 'l@h').rows;
+    /* output deficit 2960 shared 10:30 -> 740 to the 17th, 2220 to the 18th; cache-read deficit 300 shared 1:2 */
+    assert.deepEqual(rows.map((x) => x.slice(0, 6)), [['2026-10-17', 'claude-sonnet-5-5', 10, 750, 100, 1100], ['2026-10-18', 'claude-sonnet-5-5', 20, 2250, 200, 2200]]);
+    const s = u.sessions.find((x) => x.id === 'sess-A');
+    assert.equal(s.out, 3000); assert.equal(s.all, 30 + 3000 + 300 + 3300);
+    /* a ledger older than the records lifts nothing; cache writes already matched */
+    fs.appendFileSync(path.join(p, 's.jsonl'), rec('d', '2026-10-18T12:00:00.000Z', 5000) + '\n');
+    r = run({ USAGE_MEMBER: 'l2' }); assert.equal(r.status, 0, r.stderr);
+    u = (await H.get(col.url + '/api/usage' + K)).json;
+    const rows2 = u.members.find((m) => m.id === 'l2@h').rows;
+    assert.deepEqual(rows2.map((x) => [x[0], x[3], x[5]]), [['2026-10-17', 10, 1000], ['2026-10-18', 5030, 3000]], 'counted output already above the ledger: no lift; cache reads: 4000 counted > 3300');
+    /* switched off: exactly the records, like ccusage */
+    r = run({ USAGE_MEMBER: 'l3', USAGE_LEDGER: '0' }); assert.equal(r.status, 0, r.stderr);
+    u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.deepEqual(u.members.find((m) => m.id === 'l3@h').rows.map((x) => [x[0], x[3]]), [['2026-10-17', 10], ['2026-10-18', 5030]]);
+    assert.match(spawnSync(process.execPath, [AGENT, '--status'], { env: Object.assign({}, process.env, { USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'st-')) }), encoding: 'utf8' }).stdout, /0 session ledgers/);
+  } finally { await col.stop(); }
 });
 
 /* drive the agent as Claude Code would: JSON-RPC over stdio */

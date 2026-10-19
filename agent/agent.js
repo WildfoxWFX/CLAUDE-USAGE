@@ -5,6 +5,9 @@
    totals and per-session totals, and sends what changed to the collector on your server: on start, every minute
    while Claude Code runs, and when Claude Code exits. The collector replaces what it holds for the days sent, so
    sending twice never counts twice and a lost state file only costs a full re-send.
+   Counting follows ccusage (one API response = one record, the streamed chunk with the largest usage wins,
+   fast-mode requests are priced as <model>-fast), plus Claude Code's own per-session ledger (the cost-state
+   records), which also counts the subagent output tokens the per-message records understate.
    Tools offered to Claude: usage_sync_now, usage_status, usage_summary.
    Also runs by hand: node agent.js --once (scan, send, print a summary) or --status.
    Node 18+, no dependencies. Everything on stdout is MCP; logs go to stderr. */
@@ -21,7 +24,12 @@ const READ_KEY = (env.USAGE_READ_KEY || '').trim() || KEY;
 function pct(s) { if (!/%[0-9a-f]{2}/i.test(s)) return s; try { return decodeURIComponent(s); } catch (e) { return s; } }
 const MEMBER = pct(env.USAGE_MEMBER || '').replace(/\s+/g, ' ').trim().slice(0, 60) || safeUser();
 const HOST = pct(env.USAGE_HOST || '').replace(/\s+/g, ' ').trim().slice(0, 60) || os.hostname().split('.')[0];
-const CLAUDE_DIR = env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+/* where the logs are: USAGE_CLAUDE_DIR or CLAUDE_CONFIG_DIR (comma-separated), else ~/.claude and ~/.config/claude like ccusage */
+const CLAUDE_ROOTS = ((env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR || '').split(',').map((s) => s.trim()).filter(Boolean).length
+  ? (env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR).split(',').map((s) => s.trim()).filter(Boolean)
+  : [path.join(os.homedir(), '.claude'), path.join(env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'claude')]);
+const CLAUDE_DIR = CLAUDE_ROOTS.join(', ');
+const USE_LEDGER = env.USAGE_LEDGER !== '0';
 const STATE_DIR = env.USAGE_STATE_DIR || path.join(os.homedir(), '.claude-usage');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const INTERVAL = Math.max(10000, Number(env.USAGE_INTERVAL_MS) || 60000);
@@ -38,17 +46,24 @@ function log() { process.stderr.write(new Date().toISOString() + ' claude-usage:
 function validTZ(name) { if (!name) return ''; try { new Intl.DateTimeFormat('en-CA', { timeZone: name }); return name; } catch (e) { return ''; } }
 let dayFmt = null, dayFmtZone = null;
 function dayOf(ms, zone) {
-  if (!dayFmt || dayFmtZone !== zone) { dayFmt = new Intl.DateTimeFormat('en-CA', Object.assign({ year: 'numeric', month: '2-digit', day: '2-digit' }, zone ? { timeZone: zone } : {})); dayFmtZone = zone; }
-  return dayFmt.format(new Date(ms));
+  if (!dayFmt || dayFmtZone !== zone) { dayFmt = new Intl.DateTimeFormat('en', Object.assign({ year: 'numeric', month: '2-digit', day: '2-digit' }, zone ? { timeZone: zone } : {})); dayFmtZone = zone; }
+  const p = {};
+  dayFmt.formatToParts(new Date(ms)).forEach((x) => { p[x.type] = x.value; });
+  return p.year + '-' + p.month + '-' + p.day;
 }
 
 /* ---------- state ---------- */
-function emptyState() { return { v: 1, tz: '', files: {}, days: {}, sessions: {}, keys: [], dirtyDays: [], dirtySessions: [], full: true, lastActivity: '', lastScan: '', lastSync: '', lastSyncOk: '', lastError: '', fails: 0, nextTry: 0, sent: 0 }; }
-let state = emptyState(), keySet = new Map(); /* message key -> output tokens counted so far */
+function emptyState() { return { v: 1, tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, keys: [], dirtyDays: [], dirtySessions: [], full: true, lastActivity: '', lastScan: '', lastSync: '', lastSyncOk: '', lastError: '', fails: 0, nextTry: 0, sent: 0 }; }
+let state = emptyState(), keySet = new Map(); /* message key -> { out: output tokens counted so far, day } */
 function loadState() {
   try {
     const o = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (o && o.v === 1 && o.days && o.files) { state = Object.assign(emptyState(), o); state.keys = state.keys.filter((k) => Array.isArray(k) && k.length === 2); keySet = new Map(state.keys); return true; }
+    if (o && o.v === 1 && o.days && o.files) {
+      state = Object.assign(emptyState(), o);
+      state.keys = state.keys.filter((k) => Array.isArray(k) && k.length >= 2);
+      keySet = new Map(state.keys.map((k) => [k[0], { out: k[1], day: k[2] || '' }]));
+      return true;
+    }
   } catch (e) { if (e.code !== 'ENOENT') log('state file unreadable, starting over:', e.message); }
   state = emptyState(); keySet = new Map();
   return false;
@@ -62,7 +77,7 @@ function saveState() {
   } catch (e) { log('could not save state:', e.message); }
 }
 function resetTotals() {
-  state.files = {}; state.days = {}; state.sessions = {}; state.keys = []; keySet = new Map();
+  state.files = {}; state.days = {}; state.sessions = {}; state.sessDays = {}; state.ledgers = {}; state.keys = []; keySet = new Map();
   state.dirtyDays = []; state.dirtySessions = []; state.full = true;
 }
 
@@ -77,7 +92,11 @@ function walk(dir, out) {
   }
   return out;
 }
-function listLogs() { return walk(path.join(CLAUDE_DIR, 'projects'), []); }
+function listLogs() {
+  const out = [];
+  CLAUDE_ROOTS.forEach((root) => { walk(path.basename(root) === 'projects' ? root : path.join(root, 'projects'), out); });
+  return out;
+}
 /* read complete lines from a byte offset; a partial last line waits for the next round */
 function readFrom(file, offset) {
   const fd = fs.openSync(file, 'r');
@@ -108,11 +127,14 @@ function parseLine(line) {
   if (o.isApiErrorMessage) return null;
   const m = o.message, u = m.usage;
   if (!u || typeof u !== 'object') return null;
-  const model = typeof m.model === 'string' ? m.model.trim().toLowerCase() : '';
+  let model = typeof m.model === 'string' ? m.model.trim().toLowerCase() : '';
   if (!/^claude-/.test(model)) return null;
+  if (u.speed === 'fast') model += '-fast'; /* fast mode is billed as a dearer model */
   const ms = Date.parse(o.timestamp);
   if (!Number.isFinite(ms) || ms < Date.parse(MIN_DATE)) return null;
-  const key = (typeof m.id === 'string' && m.id ? m.id : 'u:' + o.uuid) + ':' + (typeof o.requestId === 'string' ? o.requestId : '');
+  /* a real message id is unique per API response (and shared by every streamed chunk of it); anything else is scoped by request */
+  const id = typeof m.id === 'string' && m.id ? m.id : '';
+  const key = /^msg_/.test(id) ? id : (id || 'u:' + o.uuid) + ':' + (typeof o.requestId === 'string' ? o.requestId : '');
   const cw = num(u.cache_creation_input_tokens), cc = u.cache_creation && typeof u.cache_creation === 'object' ? u.cache_creation : null;
   return {
     key, ms, model, in: num(u.input_tokens), out: num(u.output_tokens), cw, cr: num(u.cache_read_input_tokens),
@@ -120,15 +142,32 @@ function parseLine(line) {
     session: typeof o.sessionId === 'string' && o.sessionId ? o.sessionId.slice(0, 80) : '',
   };
 }
-function remember(key, out) {
-  if (keySet.has(key)) { keySet.set(key, out); const i = state.keys.findIndex((k) => k[0] === key); if (i >= 0) state.keys[i][1] = out; return; }
-  keySet.set(key, out); state.keys.push([key, out]);
+/* Claude Code's own running total for a session (type "cost-state"): per model, input/output/cache tokens including
+   the subagents' work. The per-message records understate subagent output tokens, so this ledger lifts them. */
+function parseLedger(line) {
+  if (line.indexOf('"cost-state"') < 0) return null;
+  let o;
+  try { o = JSON.parse(line); } catch (e) { return null; }
+  if (!o || o.type !== 'cost-state' || typeof o.sessionId !== 'string' || !o.sessionId || !o.modelUsage || typeof o.modelUsage !== 'object') return null;
+  const models = {};
+  Object.keys(o.modelUsage).forEach((k) => {
+    const v = o.modelUsage[k], model = String(k).trim().toLowerCase();
+    if (!/^claude-/.test(model) || !v || typeof v !== 'object') return;
+    models[model] = [num(v.inputTokens), num(v.outputTokens), num(v.cacheCreationInputTokens), num(v.cacheReadInputTokens)];
+  });
+  return Object.keys(models).length ? { session: o.sessionId.slice(0, 80), models } : null;
+}
+function remember(key, out, day) {
+  const prev = keySet.get(key);
+  if (prev) { prev.out = out; const i = state.keys.findIndex((k) => k[0] === key); if (i >= 0) state.keys[i][1] = out; return; }
+  keySet.set(key, { out, day }); state.keys.push([key, out, day]);
   if (state.keys.length > MAX_KEYS) { const drop = state.keys.splice(0, state.keys.length - MAX_KEYS); drop.forEach((k) => keySet.delete(k[0])); }
 }
 function markDirty(list, v) { if (list.indexOf(v) < 0) list.push(v); }
-/* extra: true when r is a later chunk of a message already counted; then only the additional output tokens count */
-function applyRecord(r, zone, extra) {
-  const day = dayOf(r.ms, zone);
+/* extra: true when r is a later chunk of a message already counted; then only the additional output tokens count,
+   on the day of the first chunk (one response can stream for minutes) */
+function applyRecord(r, zone, extra, firstDay) {
+  const day = extra && firstDay ? firstDay : dayOf(r.ms, zone);
   const byModel = state.days[day] || (state.days[day] = {});
   const c = byModel[r.model] || (byModel[r.model] = [0, 0, 0, 0, 0, 0]); /* in, out, cw, cr, n, cw1h */
   if (extra) c[1] += r.out; else { c[0] += r.in; c[1] += r.out; c[2] += r.cw; c[3] += r.cr; c[4] += 1; c[5] += r.cw1h; }
@@ -140,10 +179,69 @@ function applyRecord(r, zone, extra) {
     if (at > s.last) s.last = at; if (at < s.first) s.first = at;
     const sm = s.models[r.model] || (s.models[r.model] = [0, 0, 0, 0, 0]);
     if (extra) sm[1] += r.out; else { sm[0] += r.in; sm[1] += r.out; sm[2] += r.cw; sm[3] += r.cr; sm[4] += r.cw1h; s.n++; }
+    const sd = state.sessDays[r.session] || (state.sessDays[r.session] = {});
+    const sdd = sd[day] || (sd[day] = {});
+    const sdm = sdd[r.model] || (sdd[r.model] = [0, 0, 0, 0]);
+    if (extra) sdm[1] += r.out; else { sdm[0] += r.in; sdm[1] += r.out; sdm[2] += r.cw; sdm[3] += r.cr; }
     markDirty(state.dirtySessions, r.session);
-    const ids = Object.keys(state.sessions);
-    if (ids.length > MAX_SESSIONS) ids.sort((a, b) => (state.sessions[a].last < state.sessions[b].last ? -1 : 1)).slice(0, ids.length - MAX_SESSIONS).forEach((id) => { delete state.sessions[id]; });
+    if (state.ledgers[r.session]) Object.keys(sd).forEach((d) => markDirty(state.dirtyDays, d)); /* the ledger's lift is shared across the session's days */
+    trimSessions();
   }
+}
+function trimSessions() {
+  const ids = Object.keys(state.sessions);
+  if (ids.length <= MAX_SESSIONS) return;
+  ids.sort((a, b) => (state.sessions[a].last < state.sessions[b].last ? -1 : 1)).slice(0, ids.length - MAX_SESSIONS).forEach((id) => { delete state.sessions[id]; delete state.sessDays[id]; delete state.ledgers[id]; });
+}
+function applyLedger(l) {
+  if (!USE_LEDGER) return;
+  const prev = state.ledgers[l.session];
+  if (prev && JSON.stringify(prev.models) === JSON.stringify(l.models)) return;
+  state.ledgers[l.session] = { models: l.models };
+  const sd = state.sessDays[l.session];
+  if (sd) Object.keys(sd).forEach((d) => markDirty(state.dirtyDays, d));
+  if (state.sessions[l.session]) markDirty(state.dirtySessions, l.session);
+}
+/* per session and model, how much the ledger has above what the records gave; shared out over the session's days in
+   proportion to what each day had. Never subtracts: a ledger written before the latest records simply lifts nothing. */
+function ledgerLift() {
+  const lift = {}; /* day -> model -> [in, out, cw, cr] */
+  if (!USE_LEDGER) return lift;
+  Object.keys(state.ledgers).forEach((sid) => {
+    const sd = state.sessDays[sid]; if (!sd) return;
+    const days = Object.keys(sd);
+    Object.keys(state.ledgers[sid].models).forEach((model) => {
+      const L = state.ledgers[sid].models[model], tot = [0, 0, 0, 0], have = days.filter((d) => sd[d][model]);
+      if (!have.length) return;
+      have.forEach((d) => { for (let k = 0; k < 4; k++) tot[k] += sd[d][model][k]; });
+      for (let k = 0; k < 4; k++) {
+        const deficit = L[k] - tot[k];
+        if (deficit <= 0) continue;
+        let given = 0;
+        have.forEach((d, i) => {
+          const share = i === have.length - 1 ? deficit - given : Math.round(deficit * (tot[k] ? sd[d][model][k] / tot[k] : 1 / have.length));
+          given += share;
+          const dl = lift[d] || (lift[d] = {}), ml = dl[model] || (dl[model] = [0, 0, 0, 0]);
+          ml[k] += share;
+        });
+      }
+    });
+  });
+  return lift;
+}
+function dayRow(day, model, lift) {
+  const c = state.days[day][model], l = lift[day] && lift[day][model] ? lift[day][model] : [0, 0, 0, 0];
+  return [day, model, c[0] + l[0], c[1] + l[1], c[2] + l[2], c[3] + l[3], c[4], c[5]];
+}
+function sessionRow(id) {
+  const s = state.sessions[id], L = state.ledgers[id], byModel = {};
+  Object.keys(s.models).forEach((m) => {
+    const v = s.models[m].slice(), lv = L && L.models[m];
+    if (lv) for (let k = 0; k < 4; k++) v[k] = Math.max(v[k], lv[k]);
+    byModel[m] = v;
+  });
+  if (L) Object.keys(L.models).forEach((m) => { if (!byModel[m]) byModel[m] = L.models[m].concat([0]); });
+  return { id, first: s.first, last: s.last, n: s.n, byModel };
 }
 /* scan the logs; incremental unless a file shrank or vanished or the day zone changed, then from scratch */
 function scan(reason) {
@@ -165,14 +263,15 @@ function scan(reason) {
       if (r.shrunk) { log(path.basename(f) + ' shrank, recounting everything'); resetTotals(); again = true; break; }
       for (const line of r.lines) {
         const rec = parseLine(line);
-        if (!rec) continue;
-        if (keySet.has(rec.key)) {
+        if (!rec) { const l = parseLedger(line); if (l) applyLedger(l); continue; }
+        const seenRec = keySet.get(rec.key);
+        if (seenRec) {
           /* streamed chunks repeat the message with the same input and cache counts; the output count only grows */
-          const counted = keySet.get(rec.key);
-          if (rec.out > counted) { remember(rec.key, rec.out); applyRecord(Object.assign({}, rec, { out: rec.out - counted }), zone, true); }
+          if (rec.out > seenRec.out) { const was = seenRec.out; remember(rec.key, rec.out, seenRec.day); applyRecord(Object.assign({}, rec, { out: rec.out - was }), zone, true, seenRec.day); }
           continue;
         }
-        remember(rec.key, rec.out); applyRecord(rec, zone); records++;
+        const day = dayOf(rec.ms, zone);
+        remember(rec.key, rec.out, day); applyRecord(rec, zone, false, day); records++;
       }
       state.files[f] = { offset: r.nextOffset, size: st.size, mtime: st.mtimeMs };
     }
@@ -218,9 +317,9 @@ function setZone(zone) {
   if (Object.keys(state.files).length) resetTotals();
 }
 function payload() {
-  const days = [];
-  state.dirtyDays.forEach((day) => { const bm = state.days[day]; if (!bm) return; Object.keys(bm).sort().forEach((m) => { const c = bm[m]; days.push([day, m, c[0], c[1], c[2], c[3], c[4], c[5]]); }); });
-  const sessions = state.dirtySessions.filter((id) => state.sessions[id]).map((id) => { const s = state.sessions[id]; return { id, first: s.first, last: s.last, n: s.n, byModel: s.models }; });
+  const lift = ledgerLift(), days = [];
+  state.dirtyDays.forEach((day) => { const bm = state.days[day]; if (!bm) return; Object.keys(bm).sort().forEach((m) => days.push(dayRow(day, m, lift))); });
+  const sessions = state.dirtySessions.filter((id) => state.sessions[id]).map(sessionRow);
   return { agent: { version: VERSION, node: process.version }, member: { id: MEMBER_ID, name: MEMBER, host: HOST, system: systemString(), lastActivity: state.lastActivity },
     tz: state.tz, full: state.full, days, sessions };
 }
@@ -231,8 +330,9 @@ async function sync(force) {
   const body = payload();
   if (force && !body.days.length) { /* a forced send with nothing new still re-sends everything, so the server can be rebuilt */
     body.full = true;
-    Object.keys(state.days).sort().forEach((day) => { const bm = state.days[day]; Object.keys(bm).sort().forEach((m) => { const c = bm[m]; body.days.push([day, m, c[0], c[1], c[2], c[3], c[4], c[5]]); }); });
-    body.sessions = Object.keys(state.sessions).map((id) => { const s = state.sessions[id]; return { id, first: s.first, last: s.last, n: s.n, byModel: s.models }; });
+    const lift = ledgerLift();
+    Object.keys(state.days).sort().forEach((day) => { const bm = state.days[day]; Object.keys(bm).sort().forEach((m) => body.days.push(dayRow(day, m, lift))); });
+    body.sessions = Object.keys(state.sessions).map(sessionRow);
   }
   state.lastSync = new Date().toISOString();
   try {
@@ -277,7 +377,7 @@ async function toolSyncNow(args) { return describe(await cycle(!!(args && args.e
 function toolStatus() {
   const daysN = Object.keys(state.days).length, pend = state.dirtyDays.length;
   return ['Reporting as “' + LABEL + '” (id ' + MEMBER_ID + ') to ' + (URL_BASE || '(USAGE_URL not set)') + '.',
-    'Logs: ' + CLAUDE_DIR + ' (' + Object.keys(state.files).length + ' files, ' + daysN + ' days with usage, last activity ' + when(state.lastActivity) + ').',
+    'Logs: ' + CLAUDE_DIR + ' (' + Object.keys(state.files).length + ' files, ' + daysN + ' days with usage, last activity ' + when(state.lastActivity) + '; ' + Object.keys(state.ledgers).length + ' session ledgers' + (USE_LEDGER ? '' : ', ignored') + ').',
     'Day boundaries: ' + (state.tz || 'this PC’s time zone') + '.',
     'Last scan ' + when(state.lastScan) + '; last successful send ' + when(state.lastSyncOk) + '; ' + (pend ? pend + ' day(s) waiting to be sent' : 'nothing waiting') + '.',
     state.lastError ? 'Last error: ' + state.lastError + (state.nextTry > Date.now() ? ' (next try in ' + Math.ceil((state.nextTry - Date.now()) / 60000) + ' min)' : '') : 'No errors.',
@@ -413,4 +513,4 @@ async function main() {
   learnZone();
 }
 if (require.main === module) main().catch((e) => { log('fatal:', e && e.stack || e); process.exit(1); });
-module.exports = { parseLine, readFrom, dayOf, slug, systemString, TOOLS, VERSION };
+module.exports = { parseLine, parseLedger, readFrom, dayOf, slug, systemString, TOOLS, VERSION };

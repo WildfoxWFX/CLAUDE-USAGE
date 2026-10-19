@@ -460,6 +460,7 @@ function prettyModel(id) {
   name.split('-').forEach(function (t) {
     if (!t || /^\d{8}$/.test(t) || t === 'latest') return;
     if (/^\d{1,2}$/.test(t)) ver.push(t);
+    else if (t === 'fast') extra += ' (fast)';
     else if (/^\d+$/.test(t)) rest.push(t);
     else fam.push(t.charAt(0).toUpperCase() + t.slice(1));
   });

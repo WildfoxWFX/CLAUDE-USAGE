@@ -44,14 +44,18 @@ Other hosts: `render.yaml` is a Render blueprint (the free plan has no disk, so 
 Open `https://<collector>/setup?key=READ_KEY`, type who uses the PC and paste `INGEST_KEY`. Copy the **usage agent** command for Windows or for macOS/Linux and run it on that PC. It downloads `agent.js` from the collector into `~/.claude-usage`, registers it for every project with
 
 ```
-claude mcp add -s user -e USAGE_URL=https://<collector> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<name> claude-usage -- node ~/.claude-usage/agent.js
+claude mcp add -s user claude-usage -e USAGE_URL=https://<collector> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<name> -e USAGE_HOST=<pc-name> -- node ~/.claude-usage/agent.js
 ```
 
 and sends the history already on the PC. From the next Claude Code session on, the PC reports by itself: on start, every minute while a session runs, and once more when the session ends. Run the same command again to update the agent or change the name.
 
-What the agent does: it walks `~/.claude/projects/**/*.jsonl` (or `CLAUDE_CONFIG_DIR`), reads only what was appended since last time, de-duplicates the streamed chunks of each API response the way ccusage does, totals tokens per day and model (keeping the 1-hour cache writes apart, because they cost more), and posts the days that changed. The collector replaces those days, so nothing is ever counted twice, and a lost state file only costs a full re-send. When Claude Code deletes old logs (after 30 days by default) the collector keeps the history.
+What the agent does: it walks the `projects/**/*.jsonl` logs under `~/.claude` and `~/.config/claude` (or the directories in `CLAUDE_CONFIG_DIR`, comma-separated, like ccusage), reads only what was appended since last time, de-duplicates the streamed chunks of each API response the way ccusage does (one record per `message.id`, the chunk with the largest usage wins), prices fast-mode requests as their own model (`claude-opus-5-5-fast`), totals tokens per day and model (keeping the 1-hour cache writes apart, because they cost more), and posts the days that changed. The collector replaces those days, so nothing is ever counted twice, and a lost state file only costs a full re-send. When Claude Code deletes old logs (after 30 days by default) the collector keeps the history.
 
-Agent settings (environment of the MCP server): `USAGE_URL`, `USAGE_KEY`, `USAGE_MEMBER` (the person), `USAGE_HOST` (default: the PC's name), `USAGE_READ_KEY` (default: the ingest key), `USAGE_CLAUDE_DIR`, `USAGE_STATE_DIR` (default `~/.claude-usage`), `USAGE_INTERVAL_MS` (default 60000), `USAGE_TZ` (default: the collector's zone).
+One correction on top of ccusage: Claude Code's per-message records carry only a placeholder output count for most subagent work, so ccusage understates output tokens (five-fold on a subagent-heavy session here). Claude Code also writes its own running ledger per session (`cost-state` records) that counts them properly; the agent lifts each session's days to the ledger's totals, shared in proportion. `USAGE_LEDGER=0` switches that off and gives ccusage's figures exactly.
+
+When Claude Code closes, it gives the agent only a fraction of a second, so the last minute of a session is usually sent at the start of the next one.
+
+Agent settings (environment of the MCP server): `USAGE_URL`, `USAGE_KEY`, `USAGE_MEMBER` (the person), `USAGE_HOST` (default: the PC's name; the install command pins it), `USAGE_READ_KEY` (default: the ingest key), `USAGE_CLAUDE_DIR` (comma-separated log roots), `USAGE_STATE_DIR` (default `~/.claude-usage`), `USAGE_INTERVAL_MS` (default 60000), `USAGE_TZ` (default: the collector's zone), `USAGE_LEDGER` (`0` to ignore the session ledgers).
 
 By hand: `node agent.js --once` scans and sends once (`--everything` re-sends all days), `--status` prints the state, `--summary` prints the team summary.
 
@@ -64,7 +68,7 @@ By hand: `node agent.js --once` scans and sends once (`--everything` re-sends al
 * The claude.ai artifact version of the page has a "Live usage from every PC" section: paste the collector's address and read key once and every device that opens the artifact shows the same PCs. It still accepts usage files added by hand.
 * `https://<collector>/api/usage?key=READ_KEY`: the feed, one entry per PC with `rows` of `[day, model, input, output, cacheWrite, cacheRead, cost]`, the 50 largest sessions, and which price source each model used.
 
-Costs are API list-price estimates (LiteLLM's table, refreshed at start). A Max plan is not billed per token, so they show relative weight, not what you pay.
+Costs are API list-price estimates (LiteLLM's table, refreshed at start; the 1-hour cache tier and fast mode are priced as such). Haiku 5.5's dearer tier above 100K prompt tokens is decided per request and is not reproduced from daily totals. A Max plan is not billed per token, so the figures show relative weight, not what you pay.
 
 ## Layout
 

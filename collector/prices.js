@@ -12,6 +12,10 @@ const TABLE = {
   'claude-mythos-5-1': { in: 10, out: 50, cw: 12.5, cr: 0.25, cw1h: 20 },
   'claude-opus-5': { in: 5, out: 25, cw: 6.25, cr: 0.5, cw1h: 10 },
   'claude-opus-5-5': { in: 4, out: 20, cw: 5, cr: 0.2, cw1h: 8 },
+  /* fast mode (speed: "fast") is billed as a dearer model; ccusage prices it as <model>-fast and so does the agent */
+  'claude-opus-5-5-fast': { in: 8, out: 40, cw: 10, cr: 0.4, cw1h: 16 },
+  'claude-opus-5-fast': { in: 10, out: 50, cw: 12.5, cr: 1, cw1h: 20 },
+  'claude-opus-4-8-fast': { in: 10, out: 50, cw: 12.5, cr: 1, cw1h: 20 },
   'claude-sonnet-5': { in: 2, out: 10, cw: 2.5, cr: 0.2, cw1h: 4 },
   'claude-sonnet-5-5': { in: 2, out: 10, cw: 2.5, cr: 0.1, cw1h: 4 },
   'claude-haiku-5-5': { in: 0.1, out: 0.5, cw: 0.125, cr: 0.01, cw1h: 0.2 },

@@ -46,8 +46,8 @@ function log() { console.log.apply(console, [new Date().toISOString()].concat(Ar
 function pickTZ(name) { if (!name) return null; try { new Intl.DateTimeFormat('en-CA', { timeZone: name }); return name; } catch (e) { return null; } }
 const TZ = pickTZ(env.REPORT_TZ) || pickTZ(env.TZ) || 'UTC';
 if (env.REPORT_TZ && TZ !== env.REPORT_TZ) log('REPORT_TZ "' + env.REPORT_TZ + '" is not a valid time zone, using ' + TZ);
-const DAY_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
-function dayOf(ms) { return DAY_FMT.format(new Date(ms)); } /* en-CA formats as YYYY-MM-DD */
+const DAY_FMT = new Intl.DateTimeFormat('en', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+function dayOf(ms) { const p = {}; DAY_FMT.formatToParts(new Date(ms)).forEach((x) => { p[x.type] = x.value; }); return p.year + '-' + p.month + '-' + p.day; } /* YYYY-MM-DD on every ICU build */
 function iso(ms) { return new Date(ms).toISOString(); }
 
 /* ---------- store ---------- */

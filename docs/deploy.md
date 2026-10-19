@@ -40,7 +40,7 @@ Open the setup page the VPS printed (`/setup?key=READ_KEY`) in a browser on any 
 The command it writes, for reference (values in angle brackets come from the VPS; a name with spaces is written as `Harsh%20Patel`):
 
 ```
-$d=Join-Path $env:USERPROFILE '.claude-usage';New-Item -ItemType Directory -Force -Path $d|Out-Null;$f=Join-Path $d 'agent.js';Invoke-WebRequest -UseBasicParsing -Uri '<ADDRESS>/agent.js' -OutFile $f;claude mcp remove -s user claude-usage 2>$null|Out-Null;claude mcp add -s user -e USAGE_URL=<ADDRESS> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<NAME> claude-usage -- node $f;$env:USAGE_URL='<ADDRESS>';$env:USAGE_KEY='<INGEST_KEY>';$env:USAGE_MEMBER='<NAME>';node $f --once
+$d=Join-Path $env:USERPROFILE '.claude-usage';New-Item -ItemType Directory -Force -Path $d|Out-Null;$f=Join-Path $d 'agent.js';$h=if($env:COMPUTERNAME){$env:COMPUTERNAME}else{[Net.Dns]::GetHostName()};Invoke-WebRequest -UseBasicParsing -Uri '<ADDRESS>/agent.js' -OutFile $f;claude mcp remove -s user claude-usage 2>$null|Out-Null;claude mcp add -s user claude-usage -e USAGE_URL=<ADDRESS> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<NAME> -e "USAGE_HOST=$h" -- node $f;$env:USAGE_URL='<ADDRESS>';$env:USAGE_KEY='<INGEST_KEY>';$env:USAGE_MEMBER='<NAME>';$env:USAGE_HOST=$h;node $f --once
 ```
 
 Check on the PC, inside Claude Code: `/mcp` lists `claude-usage` as connected, and asking "how much Claude did the team use this week?" makes Claude call `usage_summary`. The dashboard shows the PC as "name · PC-NAME" within a minute of the first session; its history is included.
