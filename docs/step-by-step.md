@@ -157,4 +157,5 @@ If it prints "Node.js was not found", install Node.js LTS from https://nodejs.or
 | Dashboard says "Read key needed" | Add `?key=READ_KEY` to the address |
 | A PC does not appear | In Claude Code on that PC ask Claude to run `usage_status`: it shows the last error. `401` means the key differs from `INGEST_KEY`; `fetch failed` means the address is wrong or blocked |
 | `claude-usage` missing in `/mcp` | Run `claude mcp list` in a terminal on that PC; re-run the install command |
-| Two rows for one person | Same person on two PCs: that is intended (name · PC). The same PC twice means its name changed; remove the old one only if it bothers you (it keeps its history) |
+| Two rows for one person | Same person on two PCs: that is intended (name · PC). A renamed person leaves the old row behind: remove it with `curl -X DELETE 'ADDRESS/api/members/<old-id>?key=READ_KEY'` (the id is shown in `usage_status`, URL-encoded like `harsh%40desktop-1`) |
+| "another installation already reports as ..." | Two PCs use the same name and PC name, or the PC was reinstalled from scratch. Use a different name, or remove the member on the collector as above and run the install command again |

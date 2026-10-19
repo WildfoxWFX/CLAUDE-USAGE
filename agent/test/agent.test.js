@@ -127,6 +127,8 @@ test('--once scans the logs, sends a snapshot, and later runs send only what cha
     assert.equal(u.sessions[0].all, 110 + 70 + 1000 + 5000 + 7 + 3 + 1 + 2 + 3 + 4);
     const state = JSON.parse(fs.readFileSync(path.join(st, 'state.json'), 'utf8'));
     assert.equal(state.tz, 'UTC'); assert.deepEqual(state.dirtyDays, []); assert.equal(state.full, false); assert.equal(Object.keys(state.files).length, 2);
+    assert.equal(state.v, 2); assert.equal(state.member, 'harsh-patel@desktop-1'); assert.equal(state.url, col.url); assert.match(state.token, /^[0-9a-f]{48,64}$/);
+    assert.ok(Object.values(state.files).every((f) => Array.isArray(f.tail) && Array.isArray(f.days)));
     /* nothing new: nothing sent */
     r = once(col, fx, st);
     assert.equal(r.status, 0); assert.match(r.stdout, /0 new API calls\)\. Not sent: nothing new\./);
@@ -150,16 +152,20 @@ test('--once scans the logs, sends a snapshot, and later runs send only what cha
     fs.appendFileSync(fx.main, half.slice(40) + '\n');
     r = once(col, fx, st); assert.match(r.stdout, /1 new API calls/);
     assert.deepEqual((await H.get(col.url + '/api/usage' + K)).json.members[0].rows.find((x) => x[1] === 'claude-sonnet-5-5').slice(2, 4), [161, 129]);
-    /* a log file disappears (Claude Code cleans old logs): everything is recounted, totals shrink accordingly */
+    /* a log file disappears: everything is recounted; its day is old, so the collector keeps what it has */
     fs.unlinkSync(fx.sub);
     r = once(col, fx, st);
-    assert.match(r.stderr, /log file\(s\) gone, recounting/);
+    assert.match(r.stderr, /log file\(s\) gone, recounting everything/); /* its day is recent, so nothing is frozen; the day simply has nothing left to send */
     u = (await H.get(col.url + '/api/usage' + K)).json;
     assert.equal(u.members[0].rows.length, 3, 'the server keeps the day the PC no longer has');
     assert.deepEqual(u.members[0].rows.find((x) => x[1] === 'claude-haiku-5-5').slice(2, 4), [1, 2]);
-    /* --everything re-sends it all */
+    /* --everything re-sends every day the PC still has, even with nothing new pending */
     r = once(col, fx, st, {}, ['--everything']);
     assert.match(r.stdout, /Sent 2 day-and-model rows and 1 sessions \(everything this PC has\)/);
+    /* and also when something new is pending (the collector was rebuilt, say) */
+    fs.appendFileSync(fx.main, line({ id: 'msg_12', rid: 'req_12', ts: '2026-10-17T12:00:00.000Z', usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 }) + '\n');
+    r = once(col, fx, st, {}, ['--everything']);
+    assert.match(r.stdout, /1 new API calls\. Sent 3 day-and-model rows and 1 sessions \(everything this PC has\)/);
   } finally { await col.stop(); }
 });
 
@@ -251,9 +257,155 @@ test('Claude Code\u2019s session ledger lifts the understated output tokens, sha
   } finally { await col.stop(); }
 });
 
+test('a zone change retracts the rows that moved: the collector never double counts', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), p = path.join(dir, 'projects', 'p'); fs.mkdirSync(p, { recursive: true });
+  const st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  fs.writeFileSync(path.join(p, 's.jsonl'), line({ id: 'msg_o', rid: 'req_o', ts: '2026-10-18T22:30:00.000Z', model: 'claude-opus-4-1-20250805', usage: { input_tokens: 7, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 }) + '\n' +
+    line({ id: 'msg_s', rid: 'req_s', ts: '2026-10-18T10:00:00.000Z', usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 }) + '\n');
+  const base = { USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'z', USAGE_HOST: 'H', USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: st };
+  try {
+    /* first in Kolkata (the opus call lands on the 19th), then the collector's UTC */
+    let r = spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, base, { USAGE_TZ: 'Asia/Kolkata' }), encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    let rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[1]]), [['2026-10-18', 'claude-sonnet-5-5'], ['2026-10-19', 'claude-opus-4-1-20250805']]);
+    r = spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, base), encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr); assert.match(r.stderr, /day boundaries follow UTC, recounting/);
+    rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[1], x[3]]), [['2026-10-18', 'claude-opus-4-1-20250805', 3], ['2026-10-18', 'claude-sonnet-5-5', 1]], 'the 19th is gone');
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.members[0].events, 2);
+    /* the collector's zone changes later: same outcome the other way */
+    await col.stop();
+    const col2 = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'Asia/Kolkata' });
+    try {
+      const base2 = Object.assign({}, base, { USAGE_URL: col2.url });
+      r = spawnSync(process.execPath, [AGENT, '--once'], { env: Object.assign({}, process.env, base2), encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr); assert.match(r.stderr, /collector or name changed: everything will be sent again/);
+      rows = (await H.get(col2.url + '/api/usage' + K)).json.members[0].rows;
+      assert.deepEqual(rows.map((x) => [x[0], x[1]]), [['2026-10-18', 'claude-sonnet-5-5'], ['2026-10-19', 'claude-opus-4-1-20250805']]);
+    } finally { await col2.stop(); }
+  } finally { if (col.proc.exitCode === null) await col.stop(); }
+});
+
+test('a renamed person or a new collector gets the whole history, not only new days', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const fx = fixture(), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  try {
+    let r = once(col, fx, st, { USAGE_MEMBER: 'Harsh Patle' }); assert.equal(r.status, 0, r.stderr);
+    r = once(col, fx, st, { USAGE_MEMBER: 'Harsh Patel' }); assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /collector or name changed/); assert.match(r.stdout, /Sent 3 day-and-model rows and 1 sessions \(everything this PC has\)/);
+    const u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u.members.find((m) => m.id === 'harsh-patel@desktop-1').rows.length, 3);
+    assert.equal(u.members.find((m) => m.id === 'harsh-patle@desktop-1').rows.length, 3, 'the old name stays until removed on the collector');
+    const del = await fetch(col.url + '/api/members/harsh-patle%40desktop-1' + K, { method: 'DELETE' });
+    assert.equal(del.status, 200);
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.members.length, 1);
+  } finally { await col.stop(); }
+});
+
+test('two installations with the same name and PC: the second is refused with a clear message', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const fx = fixture(), st1 = fs.mkdtempSync(path.join(os.tmpdir(), 'st-')), st2 = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  try {
+    assert.equal(once(col, fx, st1).status, 0);
+    /* the same PC again (same Claude Code install id) derives the same token and is fine */
+    const same = once(col, fx, st2);
+    assert.equal(same.status, 0, same.stdout + same.stderr);
+    /* another PC: no shared install id, so its token differs */
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'other-home-'));
+    const r = once(col, fx, fs.mkdtempSync(path.join(os.tmpdir(), 'st-')), { HOME: other, USERPROFILE: other });
+    assert.equal(r.status, 1, r.stdout + r.stderr); assert.match(r.stdout, /answered 403: another installation already reports as “harsh-patel@desktop-1”/); assert.ok(!/\.\.$/.test(r.stdout.trim()), r.stdout);
+    assert.match(r.stdout, /DELETE \/api\/members\/harsh-patel%40desktop-1/);
+    assert.equal(once(col, fx, st1).status, 0, 'the first keeps working');
+  } finally { await col.stop(); }
+});
+
+test('days an old deleted log covered are frozen, recent ones are recounted', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), p = path.join(dir, 'projects', 'p'); fs.mkdirSync(p, { recursive: true });
+  const st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  const today = new Date().toISOString().slice(0, 10), rec = (id, ts, inTok) => line({ id: 'msg_' + id, rid: 'req_' + id, ts, usage: { input_tokens: inTok, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 });
+  fs.writeFileSync(path.join(p, 'old.jsonl'), rec('a', '2026-09-15T10:00:00.000Z', 100) + '\n');
+  fs.writeFileSync(path.join(p, 'long.jsonl'), rec('b', '2026-09-15T11:00:00.000Z', 10) + '\n' + rec('c', today + 'T01:00:00.000Z', 5) + '\n');
+  fs.writeFileSync(path.join(p, 'fresh.jsonl'), rec('d', today + 'T02:00:00.000Z', 50) + '\n');
+  const env2 = Object.assign({}, process.env, { USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'f', USAGE_HOST: 'H', USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: st });
+  try {
+    assert.equal(spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' }).status, 0);
+    let rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[2]]), [['2026-09-15', 110], [today, 55]]);
+    /* Claude Code's cleanup removes the old file: September keeps its 110 on the collector */
+    fs.unlinkSync(path.join(p, 'old.jsonl'));
+    let r = spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr); assert.match(r.stderr, /1 old day\(s\) kept as the collector has them/);
+    rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[2]]), [['2026-09-15', 110], [today, 55]]);
+    /* a file for today is deleted by hand: today is recent, so it is recounted and shrinks */
+    fs.unlinkSync(path.join(p, 'fresh.jsonl'));
+    r = spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[2]]), [['2026-09-15', 110], [today, 5]]);
+    assert.match(spawnSync(process.execPath, [AGENT, '--status'], { env: env2, encoding: 'utf8' }).stdout, /1 old day\(s\) only on the collector/);
+  } finally { await col.stop(); }
+});
+
+test('messages keep their key across scans even with many later messages in the file', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), p = path.join(dir, 'projects', 'p'); fs.mkdirSync(p, { recursive: true });
+  const st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  const rec = (id, out) => line({ id: 'msg_' + id, rid: 'req_' + id, usage: { input_tokens: 1, output_tokens: out, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 });
+  /* first chunk of M, then 12 other messages, then the last chunk of M in a later scan */
+  fs.writeFileSync(path.join(p, 's.jsonl'), [rec('M', 5)].concat(Array.from({ length: 12 }, (_, i) => rec('x' + i, 1))).join('\n') + '\n');
+  const env2 = Object.assign({}, process.env, { USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_MEMBER: 'k', USAGE_HOST: 'H', USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: st });
+  try {
+    assert.equal(spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' }).status, 0);
+    fs.appendFileSync(path.join(p, 's.jsonl'), rec('M', 50) + '\n');
+    const r = spawnSync(process.execPath, [AGENT, '--once'], { env: env2, encoding: 'utf8' });
+    assert.match(r.stdout, /0 new API calls\. Sent 1 day-and-model rows/);
+    const row = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows[0];
+    assert.deepEqual([row[2], row[3]], [13, 62], '13 calls; M counts 50 output, not 55 and not 2 calls');
+    /* a 17th message pushes M out of the file's tail: a late duplicate of M would then count again, which is why the tail is sized for one response */
+    const state = JSON.parse(fs.readFileSync(path.join(st, 'state.json'), 'utf8'));
+    assert.equal(Object.values(state.files)[0].tail.length, 13);
+  } finally { await col.stop(); }
+});
+
+/* a stand-in for a far-away collector: /healthz answers slowly, everything else is passed through */
+function slowProxy(target, delayMs) {
+  const http = require('http');
+  const srv = http.createServer((req, res) => {
+    const forward = () => {
+      const u = new URL(req.url, target);
+      const chunks = []; req.on('data', (c) => chunks.push(c)); req.on('end', () => {
+        fetch(u, { method: req.method, headers: Object.assign({}, req.headers, { host: new URL(target).host }), body: chunks.length ? Buffer.concat(chunks) : undefined }).then(async (r) => { res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' }); res.end(Buffer.from(await r.arrayBuffer())); }, () => { res.writeHead(502); res.end(); });
+      });
+    };
+    if (req.url.startsWith('/healthz')) setTimeout(forward, delayMs); else forward();
+  });
+  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({ url: 'http://127.0.0.1:' + srv.address().port, close: () => new Promise((r) => srv.close(r)) })));
+}
+
+test('as an MCP server the first snapshot waits for the collector’s zone', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'Asia/Kolkata' });
+  const proxy = await slowProxy(col.url, 2500);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), p = path.join(dir, 'projects', 'p'); fs.mkdirSync(p, { recursive: true });
+  fs.writeFileSync(path.join(p, 's.jsonl'), line({ id: 'msg_o', rid: 'req_o', ts: '2026-10-18T22:30:00.000Z', model: 'claude-opus-4-1-20250805', usage: { input_tokens: 7, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, cw1h: 0 }) + '\n');
+  const a = mcp({ url: proxy.url }, { dir }, fs.mkdtempSync(path.join(os.tmpdir(), 'st-')));
+  try {
+    await a.call('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.303' } });
+    a.notify('notifications/initialized');
+    assert.ok(await H.until(async () => (await H.get(col.url + '/api/usage' + K)).json.members.length === 1, 12000), 'sent after the zone arrived');
+    const rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
+    assert.deepEqual(rows.map((x) => [x[0], x[1]]), [['2026-10-19', 'claude-opus-4-1-20250805']], 'bucketed in the collector’s zone, nothing stale');
+    assert.ok(a.stderr.join('').indexOf('recounting') < 0, a.stderr.join(''));
+  } finally { if (a.proc.exitCode === null) a.proc.kill(); await proxy.close(); await col.stop(); }
+});
+
 /* drive the agent as Claude Code would: JSON-RPC over stdio */
 function mcp(col, fx, st) {
   const proc = spawn(process.execPath, [AGENT], { env: env(col, { USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st, USAGE_INTERVAL_MS: '10000' }), stdio: ['pipe', 'pipe', 'pipe'] });
+  proc.on('error', () => {});
   const pending = new Map(), stderr = [], raw = [];
   let buf = '';
   proc.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); raw.push(l); try { const m = JSON.parse(l); if (m.id !== undefined && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } } catch (e) { raw.push('UNPARSEABLE:' + l); } } });

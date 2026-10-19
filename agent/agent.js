@@ -9,13 +9,14 @@
    fast-mode requests are priced as <model>-fast), plus Claude Code's own per-session ledger (the cost-state
    records), which also counts the subagent output tokens the per-message records understate.
    Tools offered to Claude: usage_sync_now, usage_status, usage_summary.
-   Also runs by hand: node agent.js --once (scan, send, print a summary) or --status.
+   Also runs by hand: node agent.js --once (scan, send, print a summary), --once --everything, --status, --summary.
    Node 18+, no dependencies. Everything on stdout is MCP; logs go to stderr. */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const env = process.env;
 const URL_BASE = (env.USAGE_URL || '').trim().replace(/\/+$/, '');
 const KEY = (env.USAGE_KEY || '').trim();
@@ -25,25 +26,24 @@ function pct(s) { if (!/%[0-9a-f]{2}/i.test(s)) return s; try { return decodeURI
 const MEMBER = pct(env.USAGE_MEMBER || '').replace(/\s+/g, ' ').trim().slice(0, 60) || safeUser();
 const HOST = pct(env.USAGE_HOST || '').replace(/\s+/g, ' ').trim().slice(0, 60) || os.hostname().split('.')[0];
 /* where the logs are: USAGE_CLAUDE_DIR or CLAUDE_CONFIG_DIR (comma-separated), else ~/.claude and ~/.config/claude like ccusage */
-const CLAUDE_ROOTS = ((env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR || '').split(',').map((s) => s.trim()).filter(Boolean).length
-  ? (env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR).split(',').map((s) => s.trim()).filter(Boolean)
-  : [path.join(os.homedir(), '.claude'), path.join(env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'claude')]);
+const ROOTS_GIVEN = (env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR || '').split(',').map((s) => s.trim()).filter(Boolean);
+const CLAUDE_ROOTS = ROOTS_GIVEN.length ? ROOTS_GIVEN : [path.join(os.homedir(), '.claude'), path.join(env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'claude')];
 const CLAUDE_DIR = CLAUDE_ROOTS.join(', ');
-const USE_LEDGER = env.USAGE_LEDGER !== '0';
 const STATE_DIR = env.USAGE_STATE_DIR || path.join(os.homedir(), '.claude-usage');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const INTERVAL = Math.max(10000, Number(env.USAGE_INTERVAL_MS) || 60000);
 const TZ_OVERRIDE = (env.USAGE_TZ || '').trim();
-const MAX_SESSIONS = 1000, MAX_KEYS = 30000, MIN_DATE = '2024-01-01';
+const USE_LEDGER = env.USAGE_LEDGER !== '0';
+const MAX_SESSIONS = 1000, TAIL = 16, MIN_DATE = '2024-01-01', FREEZE_AFTER_DAYS = 2;
 
 function safeUser() { try { return os.userInfo().username; } catch (e) { return 'unknown'; } }
 function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'member'; }
 const MEMBER_ID = slug(MEMBER) + '@' + HOST.toLowerCase();
-const LABEL = MEMBER.toLowerCase() === HOST.toLowerCase() ? MEMBER : MEMBER + ' \u00B7 ' + HOST; /* as the dashboard shows it */
+const LABEL = MEMBER.toLowerCase() === HOST.toLowerCase() ? MEMBER : MEMBER + ' · ' + HOST; /* as the dashboard shows it */
 function log() { process.stderr.write(new Date().toISOString() + ' claude-usage: ' + Array.prototype.join.call(arguments, ' ') + '\n'); }
 
 /* ---------- time ---------- */
-function validTZ(name) { if (!name) return ''; try { new Intl.DateTimeFormat('en-CA', { timeZone: name }); return name; } catch (e) { return ''; } }
+function validTZ(name) { if (!name) return ''; try { new Intl.DateTimeFormat('en', { timeZone: name }); return name; } catch (e) { return ''; } }
 let dayFmt = null, dayFmtZone = null;
 function dayOf(ms, zone) {
   if (!dayFmt || dayFmtZone !== zone) { dayFmt = new Intl.DateTimeFormat('en', Object.assign({ year: 'numeric', month: '2-digit', day: '2-digit' }, zone ? { timeZone: zone } : {})); dayFmtZone = zone; }
@@ -51,22 +51,51 @@ function dayOf(ms, zone) {
   dayFmt.formatToParts(new Date(ms)).forEach((x) => { p[x.type] = x.value; });
   return p.year + '-' + p.month + '-' + p.day;
 }
+function daysAgo(n, zone) { return dayOf(Date.now() - n * 86400000, zone); }
 
 /* ---------- state ---------- */
-function emptyState() { return { v: 1, tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, keys: [], dirtyDays: [], dirtySessions: [], full: true, lastActivity: '', lastScan: '', lastSync: '', lastSyncOk: '', lastError: '', fails: 0, nextTry: 0, sent: 0 }; }
-let state = emptyState(), keySet = new Map(); /* message key -> { out: output tokens counted so far, day } */
+function emptyState() {
+  return { v: 2, url: URL_BASE, member: MEMBER_ID, token: '', tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, frozenDays: [], retract: null, zeroRows: [],
+    dirtyDays: [], dirtySessions: [], full: true, lastActivity: '', lastScan: '', lastSync: '', lastSyncOk: '', lastError: '', fails: 0, nextTry: 0, sent: 0 };
+}
+let state = emptyState();
+let keySet = new Map(); /* message key -> { out: output tokens counted so far, day, file } */
+function rebuildKeys() {
+  keySet = new Map();
+  Object.keys(state.files).forEach((f) => { (state.files[f].tail || []).forEach((k) => { keySet.set(k[0], { out: k[1], day: k[2], file: f }); }); });
+}
+function markAllDirty() {
+  state.dirtyDays = Object.keys(state.days).filter((d) => state.frozenDays.indexOf(d) < 0);
+  state.dirtySessions = Object.keys(state.sessions);
+  state.full = true;
+}
 function loadState() {
+  let loaded = false;
   try {
     const o = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (o && o.v === 1 && o.days && o.files) {
-      state = Object.assign(emptyState(), o);
-      state.keys = state.keys.filter((k) => Array.isArray(k) && k.length >= 2);
-      keySet = new Map(state.keys.map((k) => [k[0], { out: k[1], day: k[2] || '' }]));
-      return true;
-    }
+    if (o && o.v === 2 && o.days && o.files) { state = Object.assign(emptyState(), o); loaded = true; }
+    else if (o && o.v === 1) { log('state file from an older agent, counting again'); }
   } catch (e) { if (e.code !== 'ENOENT') log('state file unreadable, starting over:', e.message); }
-  state = emptyState(); keySet = new Map();
-  return false;
+  if (!loaded) state = emptyState();
+  rebuildKeys();
+  /* data sent under another name or to another collector must go again in full */
+  if (state.url !== URL_BASE || state.member !== MEMBER_ID) {
+    if (loaded) log('collector or name changed: everything will be sent again');
+    state.url = URL_BASE; state.member = MEMBER_ID; state.token = ''; markAllDirty();
+  }
+  if (!state.token) state.token = makeToken();
+  return loaded;
+}
+/* a secret only this PC knows, so no other PC with the shared ingest key can post as this one:
+   derived from Claude Code's anonymous install id when available, else random and kept in the state file */
+function makeToken() {
+  let seed = '';
+  for (const root of CLAUDE_ROOTS) {
+    try { const j = JSON.parse(fs.readFileSync(path.join(path.basename(root) === 'projects' ? path.dirname(root) : root, '.claude.json'), 'utf8')); if (j && typeof j.userID === 'string' && j.userID) { seed = j.userID; break; } } catch (e) {}
+  }
+  if (!seed) { try { seed = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')).userID || ''; } catch (e) {} }
+  if (seed) return crypto.createHash('sha256').update('claude-usage:' + seed + ':' + MEMBER_ID).digest('hex');
+  return crypto.randomBytes(24).toString('hex');
 }
 function saveState() {
   try {
@@ -76,8 +105,9 @@ function saveState() {
     fs.renameSync(tmp, STATE_FILE);
   } catch (e) { log('could not save state:', e.message); }
 }
+function pairsNow() { const out = []; Object.keys(state.days).forEach((d) => { Object.keys(state.days[d]).forEach((m) => out.push(d + '|' + m)); }); return out; }
 function resetTotals() {
-  state.files = {}; state.days = {}; state.sessions = {}; state.sessDays = {}; state.ledgers = {}; state.keys = []; keySet = new Map();
+  state.files = {}; state.days = {}; state.sessions = {}; state.sessDays = {}; state.ledgers = {}; keySet = new Map();
   state.dirtyDays = []; state.dirtySessions = []; state.full = true;
 }
 
@@ -157,21 +187,22 @@ function parseLedger(line) {
   });
   return Object.keys(models).length ? { session: o.sessionId.slice(0, 80), models } : null;
 }
-function remember(key, out, day) {
+/* the keys of a file's last messages: chunks of one response are always in the same file, in order */
+function remember(fe, file, key, out, day) {
   const prev = keySet.get(key);
-  if (prev) { prev.out = out; const i = state.keys.findIndex((k) => k[0] === key); if (i >= 0) state.keys[i][1] = out; return; }
-  keySet.set(key, { out, day }); state.keys.push([key, out, day]);
-  if (state.keys.length > MAX_KEYS) { const drop = state.keys.splice(0, state.keys.length - MAX_KEYS); drop.forEach((k) => keySet.delete(k[0])); }
+  if (prev) { prev.out = out; const t = (state.files[prev.file] || {}).tail || []; const i = t.findIndex((k) => k[0] === key); if (i >= 0) t[i][1] = out; return; }
+  keySet.set(key, { out, day, file }); fe.tail.push([key, out, day]);
+  if (fe.tail.length > TAIL) { const drop = fe.tail.shift(); const cur = keySet.get(drop[0]); if (cur && cur.file === file) keySet.delete(drop[0]); }
 }
 function markDirty(list, v) { if (list.indexOf(v) < 0) list.push(v); }
 /* extra: true when r is a later chunk of a message already counted; then only the additional output tokens count,
    on the day of the first chunk (one response can stream for minutes) */
-function applyRecord(r, zone, extra, firstDay) {
-  const day = extra && firstDay ? firstDay : dayOf(r.ms, zone);
+function applyRecord(r, day, extra, fe) {
   const byModel = state.days[day] || (state.days[day] = {});
   const c = byModel[r.model] || (byModel[r.model] = [0, 0, 0, 0, 0, 0]); /* in, out, cw, cr, n, cw1h */
   if (extra) c[1] += r.out; else { c[0] += r.in; c[1] += r.out; c[2] += r.cw; c[3] += r.cr; c[4] += 1; c[5] += r.cw1h; }
   markDirty(state.dirtyDays, day);
+  if (fe && fe.days.indexOf(day) < 0) fe.days.push(day);
   const at = new Date(r.ms).toISOString();
   if (!state.lastActivity || at > state.lastActivity) state.lastActivity = at;
   if (r.session) {
@@ -243,23 +274,29 @@ function sessionRow(id) {
   if (L) Object.keys(L.models).forEach((m) => { if (!byModel[m]) byModel[m] = L.models[m].concat([0]); });
   return { id, first: s.first, last: s.last, n: s.n, byModel };
 }
-/* scan the logs; incremental unless a file shrank or vanished or the day zone changed, then from scratch */
+/* scan the logs; incremental unless a file shrank or vanished or the day zone changed, then from scratch.
+   Days that a vanished file covered can only shrink (Claude Code deletes logs older than its retention), so old ones
+   are frozen: never sent again, the collector keeps what it has. */
 function scan(reason) {
   const zone = state.tz || '';
   let files = listLogs(), records = 0, restarted = false;
   const seen = new Set(files);
   const gone = Object.keys(state.files).filter((f) => !seen.has(f));
-  if (gone.length && Object.keys(state.files).length) { log(gone.length + ' log file(s) gone, recounting everything'); resetTotals(); restarted = true; }
+  if (gone.length) {
+    const cutoff = daysAgo(FREEZE_AFTER_DAYS, zone);
+    gone.forEach((f) => { (state.files[f].days || []).forEach((d) => { if (d < cutoff) markDirty(state.frozenDays, d); }); });
+    log(gone.length + ' log file(s) gone, recounting everything' + (state.frozenDays.length ? ' (' + state.frozenDays.length + ' old day(s) kept as the collector has them)' : ''));
+    resetTotals(); restarted = true;
+  }
   for (let pass = 0; pass < 2; pass++) {
     let again = false;
     for (const f of files) {
       let st;
       try { st = fs.statSync(f); } catch (e) { continue; }
-      const prev = state.files[f];
-      if (prev && prev.size === st.size && prev.mtime === st.mtimeMs) continue;
-      const offset = prev ? prev.offset : 0;
+      const fe = state.files[f] || (state.files[f] = { offset: 0, size: 0, mtime: 0, tail: [], days: [] });
+      if (fe.size === st.size && fe.mtime === st.mtimeMs && fe.offset) continue;
       let r;
-      try { r = readFrom(f, offset); } catch (e) { log('cannot read', f, e.message); continue; }
+      try { r = readFrom(f, fe.offset); } catch (e) { log('cannot read', f, e.message); continue; }
       if (r.shrunk) { log(path.basename(f) + ' shrank, recounting everything'); resetTotals(); again = true; break; }
       for (const line of r.lines) {
         const rec = parseLine(line);
@@ -267,17 +304,24 @@ function scan(reason) {
         const seenRec = keySet.get(rec.key);
         if (seenRec) {
           /* streamed chunks repeat the message with the same input and cache counts; the output count only grows */
-          if (rec.out > seenRec.out) { const was = seenRec.out; remember(rec.key, rec.out, seenRec.day); applyRecord(Object.assign({}, rec, { out: rec.out - was }), zone, true, seenRec.day); }
+          if (rec.out > seenRec.out) { const was = seenRec.out; remember(fe, f, rec.key, rec.out, seenRec.day); applyRecord(Object.assign({}, rec, { out: rec.out - was }), seenRec.day, true, fe); }
           continue;
         }
         const day = dayOf(rec.ms, zone);
-        remember(rec.key, rec.out, day); applyRecord(rec, zone, false, day); records++;
+        remember(fe, f, rec.key, rec.out, day); applyRecord(rec, day, false, fe); records++;
       }
-      state.files[f] = { offset: r.nextOffset, size: st.size, mtime: st.mtimeMs };
+      fe.offset = r.nextOffset; fe.size = st.size; fe.mtime = st.mtimeMs;
     }
     if (!again) break;
     restarted = true; records = 0; files = listLogs();
   }
+  /* after a zone change: the (day, model) rows that no longer exist must be removed on the collector */
+  if (state.retract) {
+    const now = new Set(pairsNow());
+    state.retract.forEach((p) => { if (!now.has(p) && state.frozenDays.indexOf(p.split('|')[0]) < 0 && state.zeroRows.indexOf(p) < 0) state.zeroRows.push(p); });
+    state.retract = null;
+  }
+  state.dirtyDays = state.dirtyDays.filter((d) => state.frozenDays.indexOf(d) < 0);
   state.lastScan = new Date().toISOString();
   saveState();
   return { files: files.length, records, restarted, reason: reason || '' };
@@ -303,42 +347,41 @@ async function fetchJSON(url, opts, timeoutMs) {
   return { status: r.status, ok: r.ok, json, text };
 }
 async function learnZone() {
-  if (TZ_OVERRIDE) { setZone(validTZ(TZ_OVERRIDE) || ''); return; }
-  if (!URL_BASE) return;
+  if (TZ_OVERRIDE) { setZone(validTZ(TZ_OVERRIDE) || ''); return true; }
+  if (!URL_BASE) return false;
   try {
     const r = await fetchJSON(URL_BASE + '/healthz', {}, 8000);
-    if (r.ok && r.json && typeof r.json.tz === 'string' && validTZ(r.json.tz)) setZone(r.json.tz);
+    if (r.ok && r.json && typeof r.json.tz === 'string' && validTZ(r.json.tz)) { setZone(r.json.tz); return true; }
   } catch (e) { /* keep the zone we have */ }
+  return false;
 }
 function setZone(zone) {
   if (zone === state.tz) return;
-  log('day boundaries follow ' + (zone || 'this PC’s zone') + (state.tz || Object.keys(state.days).length ? ', recounting' : ''));
+  const had = Object.keys(state.files).length > 0;
+  log('day boundaries follow ' + (zone || 'this PC’s zone') + (had ? ', recounting' : ''));
   state.tz = zone;
-  if (Object.keys(state.files).length) resetTotals();
+  if (had) { state.retract = (state.retract || []).concat(pairsNow()); resetTotals(); }
 }
-function payload() {
+function sendableDays() { return Object.keys(state.days).filter((d) => state.frozenDays.indexOf(d) < 0).sort(); }
+function payload(everything) {
   const lift = ledgerLift(), days = [];
-  state.dirtyDays.forEach((day) => { const bm = state.days[day]; if (!bm) return; Object.keys(bm).sort().forEach((m) => days.push(dayRow(day, m, lift))); });
-  const sessions = state.dirtySessions.filter((id) => state.sessions[id]).map(sessionRow);
-  return { agent: { version: VERSION, node: process.version }, member: { id: MEMBER_ID, name: MEMBER, host: HOST, system: systemString(), lastActivity: state.lastActivity },
-    tz: state.tz, full: state.full, days, sessions };
+  const dayList = everything ? sendableDays() : state.dirtyDays.filter((d) => state.days[d] && state.frozenDays.indexOf(d) < 0);
+  dayList.forEach((day) => { const bm = state.days[day]; Object.keys(bm).sort().forEach((m) => days.push(dayRow(day, m, lift))); });
+  state.zeroRows.forEach((p) => { const i = p.indexOf('|'); days.push([p.slice(0, i), p.slice(i + 1), 0, 0, 0, 0, 0, 0]); });
+  const sessionIds = everything ? Object.keys(state.sessions) : state.dirtySessions.filter((id) => state.sessions[id]);
+  return { agent: { version: VERSION, node: process.version }, member: { id: MEMBER_ID, name: MEMBER, host: HOST, system: systemString(), lastActivity: state.lastActivity, token: state.token },
+    tz: state.tz, full: !!(everything || state.full), days, sessions: sessionIds.map(sessionRow) };
 }
 async function sync(force) {
   if (!URL_BASE || !KEY) return { sent: false, error: 'USAGE_URL and USAGE_KEY are not set' };
-  if (!state.dirtyDays.length && !state.dirtySessions.length && !force) return { sent: false, upToDate: true };
+  if (!state.dirtyDays.length && !state.dirtySessions.length && !state.zeroRows.length && !force) return { sent: false, upToDate: true };
   if (!force && state.nextTry && Date.now() < state.nextTry) return { sent: false, waiting: true, error: state.lastError };
-  const body = payload();
-  if (force && !body.days.length) { /* a forced send with nothing new still re-sends everything, so the server can be rebuilt */
-    body.full = true;
-    const lift = ledgerLift();
-    Object.keys(state.days).sort().forEach((day) => { const bm = state.days[day]; Object.keys(bm).sort().forEach((m) => body.days.push(dayRow(day, m, lift))); });
-    body.sessions = Object.keys(state.sessions).map(sessionRow);
-  }
+  const body = payload(!!force);
   state.lastSync = new Date().toISOString();
   try {
     const r = await fetchJSON(URL_BASE + '/v1/usage', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': KEY }, body: JSON.stringify(body) }, 30000);
     if (!r.ok) throw new Error('the collector answered ' + r.status + (r.json && r.json.error ? ': ' + r.json.error : ''));
-    state.dirtyDays = []; state.dirtySessions = []; state.full = false; state.fails = 0; state.nextTry = 0; state.lastError = ''; state.lastSyncOk = state.lastSync; state.sent++;
+    state.dirtyDays = []; state.dirtySessions = []; state.zeroRows = []; state.full = false; state.fails = 0; state.nextTry = 0; state.lastError = ''; state.lastSyncOk = state.lastSync; state.sent++;
     if (r.json && typeof r.json.tz === 'string' && validTZ(r.json.tz) && !TZ_OVERRIDE) setZone(r.json.tz);
     saveState();
     return { sent: true, days: body.days.length, sessions: body.sessions.length, full: body.full };
@@ -354,8 +397,11 @@ let busy = null;
 function cycle(force, reason) {
   if (busy) return busy;
   busy = (async () => {
-    try { const s = scan(reason); const r = await sync(force); return { scan: s, sync: r }; }
-    finally { busy = null; }
+    try {
+      let s = scan(reason), r = await sync(force);
+      if (state.retract) { s = scan('zone'); r = await sync(force); } /* the reply changed the zone: recount and send again now */
+      return { scan: s, sync: r };
+    } finally { busy = null; }
   })();
   return busy;
 }
@@ -370,14 +416,14 @@ function fmtInt(n) { return Math.round(n).toLocaleString('en-US'); }
 function fmtUsd(v) { return v >= 100 ? '$' + Math.round(v).toLocaleString('en-US') : '$' + v.toFixed(2); }
 function when(iso) { return iso ? iso.replace('T', ' ').slice(0, 16) + ' UTC' : 'never'; }
 function describe(r) {
-  if (!r.sync.sent) return 'Scanned ' + r.scan.files + ' log files (' + r.scan.records + ' new API calls). Not sent: ' + (r.sync.error || 'nothing new') + '.';
-  return 'Scanned ' + r.scan.files + ' log files, ' + r.scan.records + ' new API calls. Sent ' + r.sync.days + ' day-and-model rows and ' + r.sync.sessions + ' sessions' + (r.sync.full ? ' (everything this PC has)' : '') + ' to ' + URL_BASE + ' as \u201C' + LABEL + '\u201D.';
+  if (!r.sync.sent) return 'Scanned ' + r.scan.files + ' log files (' + r.scan.records + ' new API calls). Not sent: ' + String(r.sync.error || 'nothing new').replace(/\.$/, '') + '.';
+  return 'Scanned ' + r.scan.files + ' log files, ' + r.scan.records + ' new API calls. Sent ' + r.sync.days + ' day-and-model rows and ' + r.sync.sessions + ' sessions' + (r.sync.full ? ' (everything this PC has)' : '') + ' to ' + URL_BASE + ' as “' + LABEL + '”.';
 }
 async function toolSyncNow(args) { return describe(await cycle(!!(args && args.everything), 'tool')); }
 function toolStatus() {
   const daysN = Object.keys(state.days).length, pend = state.dirtyDays.length;
   return ['Reporting as “' + LABEL + '” (id ' + MEMBER_ID + ') to ' + (URL_BASE || '(USAGE_URL not set)') + '.',
-    'Logs: ' + CLAUDE_DIR + ' (' + Object.keys(state.files).length + ' files, ' + daysN + ' days with usage, last activity ' + when(state.lastActivity) + '; ' + Object.keys(state.ledgers).length + ' session ledgers' + (USE_LEDGER ? '' : ', ignored') + ').',
+    'Logs: ' + CLAUDE_DIR + ' (' + Object.keys(state.files).length + ' files, ' + daysN + ' days with usage, last activity ' + when(state.lastActivity) + '; ' + Object.keys(state.ledgers).length + ' session ledgers' + (USE_LEDGER ? '' : ', ignored') + (state.frozenDays.length ? '; ' + state.frozenDays.length + ' old day(s) only on the collector' : '') + ').',
     'Day boundaries: ' + (state.tz || 'this PC’s time zone') + '.',
     'Last scan ' + when(state.lastScan) + '; last successful send ' + when(state.lastSyncOk) + '; ' + (pend ? pend + ' day(s) waiting to be sent' : 'nothing waiting') + '.',
     state.lastError ? 'Last error: ' + state.lastError + (state.nextTry > Date.now() ? ' (next try in ' + Math.ceil((state.nextTry - Date.now()) / 60000) + ' min)' : '') : 'No errors.',
@@ -429,7 +475,10 @@ function fail(id, code, message) { send({ jsonrpc: '2.0', id, error: { code, mes
 let timer = 0, started = false;
 function startBackground() {
   if (started) return; started = true;
-  setTimeout(() => { cycle(false, 'start').then((r) => { if (r.scan.records || r.sync.sent) log('start: ' + r.scan.records + ' new API calls, ' + (r.sync.sent ? 'sent ' + r.sync.days + ' rows' : (r.sync.error || 'nothing to send'))); }); }, 1500);
+  /* the first snapshot must already use the collector's day zone, so ask for it first (8 s at most) */
+  setTimeout(() => {
+    learnZone().then(() => cycle(false, 'start')).then((r) => { if (r && (r.scan.records || r.sync.sent)) log('start: ' + r.scan.records + ' new API calls, ' + (r.sync.sent ? 'sent ' + r.sync.days + ' rows' : (r.sync.error || 'nothing to send'))); }, (e) => log('start failed:', e && e.message));
+  }, 300);
   timer = setInterval(() => { cycle(false, 'timer'); }, INTERVAL);
   setInterval(() => { learnZone(); }, 6 * 3600000).unref();
 }
@@ -510,7 +559,6 @@ async function main() {
   if (argv.indexOf('--summary') >= 0) { console.log(await toolSummary({ days: 7 })); return; }
   if (!URL_BASE || !KEY) log('USAGE_URL or USAGE_KEY is not set: usage is counted but cannot be sent');
   serve();
-  learnZone();
 }
 if (require.main === module) main().catch((e) => { log('fatal:', e && e.stack || e); process.exit(1); });
 module.exports = { parseLine, parseLedger, readFrom, dayOf, slug, systemString, TOOLS, VERSION };

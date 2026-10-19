@@ -5,6 +5,7 @@
      POST /v1/logs            OTLP logs from Claude Code (x-api-key must equal INGEST_KEY)
      POST /v1/metrics|traces  accepted and dropped, so enabling those exporters does no harm
      POST /v1/usage           snapshots from the local usage agent (agent/agent.js): per-day totals that replace what is held
+     DELETE /api/members/<id> forget one member (READ_KEY), e.g. after a rename
      GET  /agent.js           the agent itself, for the install command on the setup page
      GET  /api/usage?key=     the usage feed the ledger reads (READ_KEY, if set)
      GET  /?key=              the ledger itself, live
@@ -51,12 +52,22 @@ function dayOf(ms) { const p = {}; DAY_FMT.formatToParts(new Date(ms)).forEach((
 function iso(ms) { return new Date(ms).toISOString(); }
 
 /* ---------- store ---------- */
-const store = { version: 1, members: {}, days: {}, sessions: {}, seen: [], stats: { events: 0, duplicates: 0, other: 0, skipped: 0, lastEvent: '', lastBatch: '' } };
+const bare = () => Object.create(null); /* maps keyed by client-chosen ids: no prototype to pollute */
+const UNSAFE_KEY = /^(__proto__|constructor|prototype)$/;
+function safeKey(k) { return typeof k === 'string' && k.length > 0 && !UNSAFE_KEY.test(k); }
+/* a plain object from JSON -> a prototype-less copy without special keys */
+function bareCopy(v, depth) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return bare();
+  const out = bare();
+  Object.keys(v).forEach((k) => { if (!safeKey(k)) return; out[k] = depth > 0 && v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]) ? bareCopy(v[k], depth - 1) : v[k]; });
+  return out;
+}
+const store = { version: 1, members: bare(), days: bare(), sessions: bare(), seen: [], stats: { events: 0, duplicates: 0, other: 0, skipped: 0, lastEvent: '', lastBatch: '' } };
 let seenSet = new Set(), seenList = [];
 function adopt(o) {
   if (!o || typeof o !== 'object' || o.version !== 1) return false;
-  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
-  store.members = obj(o.members); store.days = obj(o.days); store.sessions = obj(o.sessions);
+  const obj = (v, depth) => bareCopy(v, depth);
+  store.members = obj(o.members, 1); store.days = obj(o.days, 2); store.sessions = obj(o.sessions, 1);
   store.stats = Object.assign(store.stats, obj(o.stats));
   seenList = Array.isArray(o.seen) ? o.seen.filter((x) => typeof x === 'string').slice(-MAX_SEEN) : [];
   seenSet = new Set(seenList);
@@ -186,6 +197,7 @@ function apiRequest(rec, a, res, ip) {
   return { key, member: memberOf(all), model, tin, tout, cw, cr, cost, ms, day: dayOf(ms), session, ip };
 }
 function apply(r) {
+  if (!safeKey(r.member.id) || !safeKey(r.model) || (r.session && !safeKey(r.session))) return false;
   let m = store.members[r.member.id];
   if (m && m.source === 'agent') { store.stats.otelSkipped = (store.stats.otelSkipped || 0) + 1; return true; } /* the agent's snapshots already cover this PC */
   if (!m) {
@@ -197,16 +209,15 @@ function apply(r) {
   if (!m.lastSeen || at > m.lastSeen) m.lastSeen = at;
   if (r.ip) m.ip = r.ip;
   m.events++;
-  const byDay = store.days[r.member.id] || (store.days[r.member.id] = {});
-  const byModel = byDay[r.day] || (byDay[r.day] = {});
+  const byDay = store.days[r.member.id] || (store.days[r.member.id] = bare());
+  const byModel = byDay[r.day] || (byDay[r.day] = bare());
   const cell = byModel[r.model] || (byModel[r.model] = [0, 0, 0, 0, 0, 0]);
   cell[0] += r.tin; cell[1] += r.tout; cell[2] += r.cw; cell[3] += r.cr; cell[4] += r.cost; cell[5] += 1;
   if (r.session) {
-    const s = store.sessions[r.session] || (store.sessions[r.session] = { member: r.member.id, first: at, last: at, models: {}, in: 0, out: 0, cw: 0, cr: 0, cost: 0, n: 0 });
+    const s = store.sessions[r.session] || (store.sessions[r.session] = { member: r.member.id, first: at, last: at, models: bare(), in: 0, out: 0, cw: 0, cr: 0, cost: 0, n: 0 });
     if (at > s.last) s.last = at; if (at < s.first) s.first = at;
     s.models[r.model] = 1; s.in += r.tin; s.out += r.tout; s.cw += r.cw; s.cr += r.cr; s.cost += r.cost; s.n++;
-    const ids = Object.keys(store.sessions);
-    if (ids.length > MAX_SESSIONS) ids.sort((a, b) => (store.sessions[a].last < store.sessions[b].last ? -1 : 1)).slice(0, ids.length - MAX_SESSIONS).forEach((id) => { delete store.sessions[id]; });
+    trimSessions(r.member.id);
   }
   store.stats.lastEvent = at;
   return true;
@@ -245,11 +256,21 @@ function validDay(s) {
   if (!m || s < MIN_DATE || s > MAX_DATE) return false;
   return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toISOString().slice(0, 10) === s;
 }
-function isoOr(v) { const ms = Date.parse(String(v || '')); return Number.isFinite(ms) ? new Date(ms).toISOString() : ''; }
+/* an ISO instant from the client, never in the future (a wrong clock or a hostile value cannot pin lastSeen ahead) */
+function isoOr(v) { const ms = Date.parse(String(v || '')); return Number.isFinite(ms) ? new Date(Math.min(ms, Date.now() + 36e5)).toISOString() : ''; }
 function snapshotError(msg) { const e = new Error(msg); e.code = 'bad_snapshot'; return e; }
-function trimSessions() {
-  const ids = Object.keys(store.sessions);
+/* each member keeps its own most recent sessions: one PC cannot push another's out of the feed */
+function trimSessions(memberId) {
+  const ids = Object.keys(store.sessions).filter((id) => store.sessions[id].member === memberId);
   if (ids.length > MAX_SESSIONS) ids.sort((a, b) => (store.sessions[a].last < store.sessions[b].last ? -1 : 1)).slice(0, ids.length - MAX_SESSIONS).forEach((id) => { delete store.sessions[id]; });
+}
+function tokenHash(tok) { return crypto.createHash('sha256').update(String(tok)).digest('base64url'); }
+function removeMember(id) {
+  if (!store.members[id]) return false;
+  delete store.members[id]; delete store.days[id];
+  Object.keys(store.sessions).forEach((sid) => { if (store.sessions[sid].member === id) delete store.sessions[sid]; });
+  markDirty();
+  return true;
 }
 /* A snapshot carries complete per-day, per-model totals for the days that changed on that PC, and complete
    per-session totals: each replaces what the store holds, so the same snapshot twice changes nothing. */
@@ -258,6 +279,7 @@ function applySnapshot(b, ip) {
   if (!mem) throw snapshotError('member is missing');
   const id = str(mem.id, 120);
   if (!id) throw snapshotError('member.id is missing');
+  if (!safeKey(id)) throw snapshotError('member.id is not allowed');
   const days = Array.isArray(b.days) ? b.days : [], sessions = Array.isArray(b.sessions) ? b.sessions : [];
   if (days.length > 20000 || sessions.length > 2000) throw snapshotError('too many rows in one snapshot');
   const now = new Date().toISOString();
@@ -266,6 +288,10 @@ function applySnapshot(b, ip) {
     if (Object.keys(store.members).length >= MAX_MEMBERS) throw snapshotError('too many members');
     m = store.members[id] = { id, firstSeen: now, events: 0 };
   }
+  /* the first agent to report an id binds it with its token; another PC posting as that id is refused */
+  const token = str(mem.token, 200);
+  if (m.tokenHash) { if (!token || tokenHash(token) !== m.tokenHash) { const e = snapshotError('another installation already reports as \u201C' + id + '\u201D. Use a different USAGE_MEMBER or USAGE_HOST, or remove that member on the collector (DELETE /api/members/' + encodeURIComponent(id) + ' with the read key).'); e.status = 403; throw e; } }
+  else if (token) m.tokenHash = tokenHash(token);
   const name = pct(str(mem.name, 60)), host = pct(str(mem.host, 60)), system = str(mem.system, 200);
   if (name) m.name = name; if (host) m.host = host; if (system) m.systemText = system;
   ['name', 'host', 'systemText', 'email', 'os', 'osVersion', 'arch', 'version', 'terminal', 'wsl'].forEach((k) => { if (m[k] === undefined) m[k] = ''; });
@@ -274,22 +300,29 @@ function applySnapshot(b, ip) {
   const la = isoOr(mem.lastActivity);
   if (la && (!m.lastSeen || la > m.lastSeen)) m.lastSeen = la;
   let nd = 0, ns = 0, rejected = 0;
-  const byDay = store.days[id] || (store.days[id] = {});
+  const byDay = store.days[id] || (store.days[id] = bare());
+  let removed = 0;
   days.forEach((row) => {
     if (!Array.isArray(row) || row.length < 6) { rejected++; return; }
     const day = str(row[0], 10), model = normModel(row[1]);
     const t = { in: num(row[2]), out: num(row[3]), cw: num(row[4]), cr: num(row[5]) };
     if (!validDay(day) || !model || t.in === null || t.out === null || t.cw === null || t.cr === null) { rejected++; return; }
+    if (t.in === 0 && t.out === 0 && t.cw === 0 && t.cr === 0 && !(num(row[6]) > 0)) {
+      /* an all-zero row retracts the cell: the PC no longer has that day and model (its day zone changed) */
+      if (byDay[day] && byDay[day][model]) { delete byDay[day][model]; if (!Object.keys(byDay[day]).length) delete byDay[day]; removed++; }
+      return;
+    }
     t.cw1h = Math.min(num(row[7]) || 0, t.cw);
-    const bm = byDay[day] || (byDay[day] = {});
+    const bm = byDay[day] || (byDay[day] = bare());
     bm[model] = [t.in, t.out, t.cw, t.cr, prices.cost(model, t), num(row[6]) || 0];
     nd++;
   });
   sessions.forEach((s) => {
     if (!s || typeof s !== 'object') { rejected++; return; }
     const sid = str(s.id, 80), last = isoOr(s.last), first = isoOr(s.first) || last;
-    if (!sid || !last) { rejected++; return; }
-    const models = {}, tot = { in: 0, out: 0, cw: 0, cr: 0, cost: 0 };
+    if (!sid || !last || !safeKey(sid)) { rejected++; return; }
+    if (store.sessions[sid] && store.sessions[sid].member !== id) { rejected++; return; } /* a session id belongs to the PC that first reported it */
+    const models = bare(), tot = { in: 0, out: 0, cw: 0, cr: 0, cost: 0 };
     const bm = s.byModel && typeof s.byModel === 'object' && !Array.isArray(s.byModel) ? s.byModel : {};
     Object.keys(bm).slice(0, 20).forEach((k) => {
       const model = normModel(k), v = bm[k];
@@ -303,7 +336,7 @@ function applySnapshot(b, ip) {
     if (!m.lastSeen || last > m.lastSeen) m.lastSeen = last;
     ns++;
   });
-  trimSessions();
+  trimSessions(id);
   let calls = 0;
   Object.keys(byDay).forEach((d) => { Object.keys(byDay[d]).forEach((k) => { calls += byDay[d][k][5] || 0; }); });
   m.events = calls;
@@ -311,8 +344,8 @@ function applySnapshot(b, ip) {
   if (la || ns || nd) store.stats.lastEvent = store.stats.lastEvent > (m.lastSeen || '') ? store.stats.lastEvent : m.lastSeen;
   store.stats.snapshots = (store.stats.snapshots || 0) + 1;
   store.stats.lastBatch = now;
-  if (nd || ns || !b.full) markDirty(); else markDirty();
-  return { days: nd, sessions: ns, rejected };
+  markDirty();
+  return { days: nd, sessions: ns, rejected, removed };
 }
 
 /* ---------- the usage feed ---------- */
@@ -342,7 +375,7 @@ function usagePayload() {
       const byModel = byDay[day];
       Object.keys(byModel).sort().forEach((model) => { const c = byModel[model]; rows.push([day, model, c[0], c[1], c[2], c[3], round6(c[4])]); });
     });
-    return { id: m.id, label, name: m.name || '', host: m.host || '', system: systemOf(m), lastSeen: m.lastSeen || '', events: m.events || 0, source: m.source === 'agent' ? 'agent' : 'otel', rows };
+    return { id: m.id, label, name: m.name || '', host: m.host || '', system: systemOf(m), lastSeen: m.lastSeen || '', events: m.events || 0, source: m.source === 'agent' ? 'agent' : 'otel', bound: !!m.tokenHash, rows };
   });
   const models = new Set();
   out.forEach((m) => { m.rows.forEach((r) => { models.add(r[1]); }); });
@@ -405,16 +438,19 @@ function readBody(req) {
       let buf = Buffer.concat(chunks);
       const enc = String(req.headers['content-encoding'] || '').toLowerCase();
       try {
-        if (enc.includes('gzip')) buf = zlib.gunzipSync(buf); else if (enc.includes('deflate')) buf = zlib.inflateSync(buf);
-      } catch (e) { reject(new Error('could not decompress the body')); return; }
-      resolve(buf.toString('utf8'));
+        if (enc.includes('gzip')) buf = zlib.gunzipSync(buf, { maxOutputLength: MAX_BODY }); else if (enc.includes('deflate')) buf = zlib.inflateSync(buf, { maxOutputLength: MAX_BODY });
+        resolve(buf.toString('utf8'));
+      } catch (e) {
+        if (e && e.code === 'ERR_BUFFER_TOO_LARGE') { const big = new Error('body larger than ' + MAX_BODY + ' bytes once decompressed'); big.code = 'too_large'; reject(big); return; }
+        reject(new Error(enc ? 'could not decompress the body' : 'could not read the body'));
+      }
     });
     req.on('error', reject);
   });
 }
 function cors(res) {
   res.setHeader('access-control-allow-origin', '*');
-  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
+  res.setHeader('access-control-allow-methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('access-control-allow-headers', 'content-type, content-encoding, x-api-key, x-read-key, authorization');
   res.setHeader('access-control-max-age', '600');
 }
@@ -431,6 +467,7 @@ async function handle(req, res) {
   const p = u.pathname.replace(/\/+$/, '') || '/';
   const method = req.method === 'HEAD' ? 'GET' : req.method;
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+  if (req.method === 'DELETE' && !/^\/api\/members\//.test(p)) return send(res, 404, { error: 'not found' });
   if (method === 'GET' && p === '/healthz') {
     return send(res, 200, { ok: true, members: Object.keys(store.members).length, events: store.stats.events, lastEvent: store.stats.lastEvent, tz: TZ, uptimeSeconds: Math.round(process.uptime()), mirror: ghOn() ? GH.repo : '' });
   }
@@ -456,9 +493,16 @@ async function handle(req, res) {
     try { body = JSON.parse(text); } catch (e) { return send(res, 400, { error: 'The body is not JSON.' }); }
     if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'The body is not a usage snapshot.' });
     let r;
-    try { r = applySnapshot(body, clientIp(req)); } catch (e) { if (e.code === 'bad_snapshot') return send(res, 400, { error: e.message }); throw e; }
-    log('snapshot from ' + (clientIp(req) || '?') + ' for ' + str(body.member.id, 120) + ': ' + r.days + ' day rows, ' + r.sessions + ' sessions' + (r.rejected ? ', ' + r.rejected + ' rejected' : '') + (body.full ? ' (full)' : ''));
-    return send(res, 200, { ok: true, tz: TZ, days: r.days, sessions: r.sessions, rejected: r.rejected });
+    try { r = applySnapshot(body, clientIp(req)); } catch (e) { if (e.code === 'bad_snapshot') { if (e.status === 403) log('refused snapshot for ' + str(body.member && body.member.id, 120) + ' from ' + (clientIp(req) || '?') + ': token mismatch'); return send(res, e.status || 400, { error: e.message }); } throw e; }
+    log('snapshot from ' + (clientIp(req) || '?') + ' for ' + str(body.member.id, 120) + ': ' + r.days + ' day rows, ' + r.sessions + ' sessions' + (r.removed ? ', ' + r.removed + ' removed' : '') + (r.rejected ? ', ' + r.rejected + ' rejected' : '') + (body.full ? ' (full)' : ''));
+    return send(res, 200, { ok: true, tz: TZ, days: r.days, sessions: r.sessions, rejected: r.rejected, removed: r.removed });
+  }
+  if (req.method === 'DELETE' && /^\/api\/members\/[^/]+$/.test(p)) {
+    if (!readOK(req, u)) return send(res, 401, { error: 'A read key is needed.' });
+    let id; try { id = decodeURIComponent(p.slice('/api/members/'.length)); } catch (e) { return send(res, 400, { error: 'bad member id' }); }
+    if (!safeKey(id) || !removeMember(id)) return send(res, 404, { error: 'no such member' });
+    log('member ' + id + ' removed by request from ' + (clientIp(req) || '?'));
+    return send(res, 200, { ok: true, removed: id });
   }
   if (method === 'GET' && (p === '/agent.js' || p === '/agent/version')) {
     let src;
