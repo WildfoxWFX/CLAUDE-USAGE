@@ -4,6 +4,8 @@
    per-member daily totals by model, plus the largest sessions, and serves them to the Claude Usage Ledger:
      POST /v1/logs            OTLP logs from Claude Code (x-api-key must equal INGEST_KEY)
      POST /v1/metrics|traces  accepted and dropped, so enabling those exporters does no harm
+     POST /v1/usage           snapshots from the local usage agent (agent/agent.js): per-day totals that replace what is held
+     GET  /agent.js           the agent itself, for the install command on the setup page
      GET  /api/usage?key=     the usage feed the ledger reads (READ_KEY, if set)
      GET  /?key=              the ledger itself, live
      GET  /setup?key=         per-PC settings generator
@@ -15,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const prices = require('./prices');
 
 const env = process.env;
 const PORT = env.PORT === undefined || env.PORT === '' ? 4318 : Number(env.PORT);
@@ -34,7 +37,8 @@ const GH = {
   api: (env.GITHUB_API || 'https://api.github.com').replace(/\/+$/, ''),
   every: Number(env.GITHUB_BACKUP_INTERVAL_MS) || 5 * 60 * 1000,
 };
-const MAX_SEEN = 60000, MAX_SESSIONS = 400, MAX_MEMBERS = 500, MIN_DATE = '2024-01-01';
+const MAX_SEEN = 60000, MAX_SESSIONS = 400, MAX_MEMBERS = 500, MIN_DATE = '2024-01-01', MAX_DATE = '2100-12-31';
+const AGENT_FILE = env.AGENT_FILE || path.join(__dirname, '..', 'agent', 'agent.js');
 
 function log() { console.log.apply(console, [new Date().toISOString()].concat(Array.prototype.slice.call(arguments))); }
 
@@ -183,6 +187,7 @@ function apiRequest(rec, a, res, ip) {
 }
 function apply(r) {
   let m = store.members[r.member.id];
+  if (m && m.source === 'agent') { store.stats.otelSkipped = (store.stats.otelSkipped || 0) + 1; return true; } /* the agent's snapshots already cover this PC */
   if (!m) {
     if (Object.keys(store.members).length >= MAX_MEMBERS) return false;
     m = store.members[r.member.id] = { id: r.member.id, firstSeen: iso(r.ms), events: 0 };
@@ -234,6 +239,82 @@ function ingest(body, ip) {
   return sum;
 }
 
+/* ---------- snapshots from the local agent ---------- */
+function validDay(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m || s < MIN_DATE || s > MAX_DATE) return false;
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toISOString().slice(0, 10) === s;
+}
+function isoOr(v) { const ms = Date.parse(String(v || '')); return Number.isFinite(ms) ? new Date(ms).toISOString() : ''; }
+function snapshotError(msg) { const e = new Error(msg); e.code = 'bad_snapshot'; return e; }
+function trimSessions() {
+  const ids = Object.keys(store.sessions);
+  if (ids.length > MAX_SESSIONS) ids.sort((a, b) => (store.sessions[a].last < store.sessions[b].last ? -1 : 1)).slice(0, ids.length - MAX_SESSIONS).forEach((id) => { delete store.sessions[id]; });
+}
+/* A snapshot carries complete per-day, per-model totals for the days that changed on that PC, and complete
+   per-session totals: each replaces what the store holds, so the same snapshot twice changes nothing. */
+function applySnapshot(b, ip) {
+  const mem = b.member && typeof b.member === 'object' ? b.member : null;
+  if (!mem) throw snapshotError('member is missing');
+  const id = str(mem.id, 120);
+  if (!id) throw snapshotError('member.id is missing');
+  const days = Array.isArray(b.days) ? b.days : [], sessions = Array.isArray(b.sessions) ? b.sessions : [];
+  if (days.length > 20000 || sessions.length > 2000) throw snapshotError('too many rows in one snapshot');
+  const now = new Date().toISOString();
+  let m = store.members[id];
+  if (!m) {
+    if (Object.keys(store.members).length >= MAX_MEMBERS) throw snapshotError('too many members');
+    m = store.members[id] = { id, firstSeen: now, events: 0 };
+  }
+  const name = pct(str(mem.name, 60)), host = pct(str(mem.host, 60)), system = str(mem.system, 200);
+  if (name) m.name = name; if (host) m.host = host; if (system) m.systemText = system;
+  ['name', 'host', 'systemText', 'email', 'os', 'osVersion', 'arch', 'version', 'terminal', 'wsl'].forEach((k) => { if (m[k] === undefined) m[k] = ''; });
+  m.source = 'agent'; m.agent = str(b.agent && b.agent.version, 20);
+  if (ip) m.ip = ip;
+  const la = isoOr(mem.lastActivity);
+  if (la && (!m.lastSeen || la > m.lastSeen)) m.lastSeen = la;
+  let nd = 0, ns = 0, rejected = 0;
+  const byDay = store.days[id] || (store.days[id] = {});
+  days.forEach((row) => {
+    if (!Array.isArray(row) || row.length < 6) { rejected++; return; }
+    const day = str(row[0], 10), model = normModel(row[1]);
+    const t = { in: num(row[2]), out: num(row[3]), cw: num(row[4]), cr: num(row[5]) };
+    if (!validDay(day) || !model || t.in === null || t.out === null || t.cw === null || t.cr === null) { rejected++; return; }
+    t.cw1h = Math.min(num(row[7]) || 0, t.cw);
+    const bm = byDay[day] || (byDay[day] = {});
+    bm[model] = [t.in, t.out, t.cw, t.cr, prices.cost(model, t), num(row[6]) || 0];
+    nd++;
+  });
+  sessions.forEach((s) => {
+    if (!s || typeof s !== 'object') { rejected++; return; }
+    const sid = str(s.id, 80), last = isoOr(s.last), first = isoOr(s.first) || last;
+    if (!sid || !last) { rejected++; return; }
+    const models = {}, tot = { in: 0, out: 0, cw: 0, cr: 0, cost: 0 };
+    const bm = s.byModel && typeof s.byModel === 'object' && !Array.isArray(s.byModel) ? s.byModel : {};
+    Object.keys(bm).slice(0, 20).forEach((k) => {
+      const model = normModel(k), v = bm[k];
+      if (!model || !Array.isArray(v)) return;
+      const t = { in: num(v[0]) || 0, out: num(v[1]) || 0, cw: num(v[2]) || 0, cr: num(v[3]) || 0 };
+      t.cw1h = Math.min(num(v[4]) || 0, t.cw);
+      models[model] = 1; tot.in += t.in; tot.out += t.out; tot.cw += t.cw; tot.cr += t.cr; tot.cost += prices.cost(model, t);
+    });
+    if (!Object.keys(models).length) { rejected++; return; }
+    store.sessions[sid] = { member: id, first, last, models, in: tot.in, out: tot.out, cw: tot.cw, cr: tot.cr, cost: tot.cost, n: num(s.n) || 0 };
+    if (!m.lastSeen || last > m.lastSeen) m.lastSeen = last;
+    ns++;
+  });
+  trimSessions();
+  let calls = 0;
+  Object.keys(byDay).forEach((d) => { Object.keys(byDay[d]).forEach((k) => { calls += byDay[d][k][5] || 0; }); });
+  m.events = calls;
+  if (!m.lastSeen) m.lastSeen = now;
+  if (la || ns || nd) store.stats.lastEvent = store.stats.lastEvent > (m.lastSeen || '') ? store.stats.lastEvent : m.lastSeen;
+  store.stats.snapshots = (store.stats.snapshots || 0) + 1;
+  store.stats.lastBatch = now;
+  if (nd || ns || !b.full) markDirty(); else markDirty();
+  return { days: nd, sessions: ns, rejected };
+}
+
 /* ---------- the usage feed ---------- */
 const OS_NAMES = { windows: 'Windows', win32: 'Windows', linux: 'Linux', darwin: 'macOS', macos: 'macOS' };
 function labelOf(m) {
@@ -242,6 +323,7 @@ function labelOf(m) {
   return name || host || m.email || 'Unnamed device';
 }
 function systemOf(m) {
+  if (m.systemText) return [m.systemText, m.ip ? 'IP ' + m.ip : ''].filter(Boolean).join(' | ').slice(0, 240);
   const os = m.os ? (OS_NAMES[m.os.toLowerCase()] || m.os) + (m.osVersion ? ' ' + m.osVersion : '') : (m.osVersion || '');
   return [os, m.arch, m.wsl ? 'WSL ' + m.wsl : '', m.version ? 'Claude Code ' + m.version : '', m.terminal, m.ip ? 'IP ' + m.ip : ''].filter(Boolean).join(' | ');
 }
@@ -260,13 +342,15 @@ function usagePayload() {
       const byModel = byDay[day];
       Object.keys(byModel).sort().forEach((model) => { const c = byModel[model]; rows.push([day, model, c[0], c[1], c[2], c[3], round6(c[4])]); });
     });
-    return { id: m.id, label, name: m.name || '', host: m.host || '', system: systemOf(m), lastSeen: m.lastSeen || '', events: m.events || 0, rows };
+    return { id: m.id, label, name: m.name || '', host: m.host || '', system: systemOf(m), lastSeen: m.lastSeen || '', events: m.events || 0, source: m.source === 'agent' ? 'agent' : 'otel', rows };
   });
+  const models = new Set();
+  out.forEach((m) => { m.rows.forEach((r) => { models.add(r[1]); }); });
   const sessions = Object.keys(store.sessions).map((id) => {
     const s = store.sessions[id];
     return { pc: labelById[s.member] || '', id, last: s.last, models: Object.keys(s.models).sort(), out: s.out, all: s.in + s.out + s.cw + s.cr, cost: round6(s.cost) };
   }).filter((s) => s.pc).sort((a, b) => b.cost - a.cost).slice(0, 50);
-  return { ok: true, generated: new Date().toISOString(), tz: TZ, members: out, sessions, stats: store.stats };
+  return { ok: true, generated: new Date().toISOString(), tz: TZ, members: out, sessions, stats: store.stats, pricing: prices.sources(Array.from(models)) };
 }
 
 /* ---------- pages ---------- */
@@ -300,7 +384,7 @@ function ingestOK(req) {
 function readOK(req, u) {
   if (!READ_KEY) return true;
   const k = u.searchParams.get('key') || req.headers['x-read-key'] || bearer(req.headers.authorization) || '';
-  return !!k && safeEq(k, READ_KEY);
+  return !!k && (safeEq(k, READ_KEY) || safeEq(k, INGEST_KEY));
 }
 function clientIp(req) {
   const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
@@ -364,6 +448,26 @@ async function handle(req, res) {
     if (sum.records) log('logs from ' + (clientIp(req) || '?') + ': ' + sum.records + ' records, ' + sum.accepted + ' api requests kept' + (sum.duplicates ? ', ' + sum.duplicates + ' duplicates' : '') + (sum.skipped ? ', ' + sum.skipped + ' unusable' : ''));
     return send(res, 200, {});
   }
+  if (method === 'POST' && p === '/v1/usage') {
+    if (!ingestOK(req)) return send(res, 401, { error: 'The x-api-key header does not match the collector\u2019s INGEST_KEY.' });
+    let text;
+    try { text = await readBody(req); } catch (e) { return send(res, e.code === 'too_large' ? 413 : 400, { error: e.message }, { connection: 'close' }); }
+    let body;
+    try { body = JSON.parse(text); } catch (e) { return send(res, 400, { error: 'The body is not JSON.' }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'The body is not a usage snapshot.' });
+    let r;
+    try { r = applySnapshot(body, clientIp(req)); } catch (e) { if (e.code === 'bad_snapshot') return send(res, 400, { error: e.message }); throw e; }
+    log('snapshot from ' + (clientIp(req) || '?') + ' for ' + str(body.member.id, 120) + ': ' + r.days + ' day rows, ' + r.sessions + ' sessions' + (r.rejected ? ', ' + r.rejected + ' rejected' : '') + (body.full ? ' (full)' : ''));
+    return send(res, 200, { ok: true, tz: TZ, days: r.days, sessions: r.sessions, rejected: r.rejected });
+  }
+  if (method === 'GET' && (p === '/agent.js' || p === '/agent/version')) {
+    let src;
+    try { src = fs.readFileSync(AGENT_FILE, 'utf8'); } catch (e) { return send(res, 404, { error: 'the agent file is not on this server' }); }
+    const v = (/const VERSION = '([^']+)'/.exec(src) || [])[1] || '';
+    if (p === '/agent/version') return send(res, 200, { version: v });
+    res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'public, max-age=300', 'x-agent-version': v });
+    return res.end(src);
+  }
   if (method === 'GET' && p === '/api/usage') {
     if (!readOK(req, u)) return send(res, 401, { error: 'A read key is needed: add ?key=READ_KEY.' });
     return send(res, 200, usagePayload());
@@ -393,6 +497,8 @@ async function main() {
     catch (e) { log('could not load the store from GitHub: ' + e.message + '. Starting empty; nothing is uploaded until new usage arrives.'); }
   } else log('starting with an empty store');
   if (GH.repo && !ghOn()) log('GITHUB_BACKUP is set but GITHUB_TOKEN is missing or the repo is not owner/name: the mirror is off');
+  await prices.refresh({ url: env.PRICES_URL, file: env.PRICES_FILE || path.join(DATA_DIR, 'prices.json'), log });
+  if (!fs.existsSync(AGENT_FILE)) log('agent file not found at ' + AGENT_FILE + ': /agent.js is off');
   try { template(); } catch (e) { log('ledger template not found at ' + TEMPLATE + ': the dashboard page is off, the usage feed still works'); }
   if (ghOn()) setInterval(() => { ghSave('scheduled'); }, GH.every).unref();
 
@@ -414,4 +520,4 @@ async function main() {
   process.on('SIGINT', () => stop('SIGINT'));
 }
 if (require.main === module) main();
-module.exports = { ingest, usagePayload, normModel, memberOf, anyVal, attrs };
+module.exports = { ingest, applySnapshot, usagePayload, normModel, memberOf, anyVal, attrs };

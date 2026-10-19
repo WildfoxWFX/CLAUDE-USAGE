@@ -7,6 +7,6 @@
   "engines": { "node": ">=18.17" },
   "scripts": {
     "start": "node collector/server.js",
-    "test": "node --test collector/test/*.test.js"
+    "test": "node --test collector/test/*.test.js agent/test/*.test.js"
   }
 }

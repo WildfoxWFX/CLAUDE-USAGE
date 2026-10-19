@@ -41,7 +41,8 @@ a { color: inherit; }
 <body>
 <div class="page">
   <h1>Set up a PC</h1>
-  <p class="lead">Each PC that runs Claude Code sends its usage here by itself, as it happens. Nothing to export or upload afterwards. Set up one PC at a time: type the name of the person who uses it, then run the command on that PC.</p>
+  <p class="lead">Each PC that runs Claude Code reports its usage here by itself. Nothing to export or upload afterwards. Set up one PC at a time: type the name of the person who uses it, then run one command on that PC.</p>
+  <p>Two ways, pick one per PC. The <b>usage agent</b> is a small MCP server that Claude Code starts with every session: it reads the PC&rsquo;s own Claude Code logs, so it also sends the history already on the PC, and it gives Claude three tools (<code>usage_summary</code>, <code>usage_status</code>, <code>usage_sync_now</code>) so anyone can ask Claude what the team used. The <b>telemetry</b> way needs no extra program but only counts from the moment it is switched on.</p>
 
   <form id="f" novalidate>
     <label for="who">Who uses this PC<input id="who" type="text" maxlength="60" autocomplete="off" placeholder="harsh"></label>
@@ -52,24 +53,31 @@ a { color: inherit; }
   </form>
 
   <div id="out" hidden>
-    <h2>Windows: paste into PowerShell on that PC</h2>
-    <p class="small">Any PowerShell window works, no administrator rights needed. It fills <code>member.host</code> with the PC&rsquo;s own name.</p>
+    <h2>Usage agent, Windows: paste into PowerShell on that PC</h2>
+    <p class="small">Needs Claude Code and Node.js (the LTS from nodejs.org) on the PC; the command says so if Node.js is missing. No administrator rights. It downloads the agent from this server into <code>%USERPROFILE%\.claude-usage</code> and registers it with <code>claude mcp add</code> for every project. Run it again any time to update.</p>
+    <div class="cmd"><pre><code id="aps"></code></pre><button type="button" class="btn ghost copy" data-for="aps">Copy</button></div>
+
+    <h2>Usage agent, macOS or Linux: paste into Terminal on that PC</h2>
+    <div class="cmd"><pre><code id="ash"></code></pre><button type="button" class="btn ghost copy" data-for="ash">Copy</button></div>
+
+    <h2>Telemetry instead, Windows: paste into PowerShell on that PC</h2>
+    <p class="small">Any PowerShell window works, no administrator rights needed. It fills <code>member.host</code> with the PC&rsquo;s own name. Do not use both ways on one PC; if you do, the agent&rsquo;s figures win.</p>
     <div class="cmd"><pre><code id="ps"></code></pre><button type="button" class="btn ghost copy" data-for="ps">Copy</button></div>
 
-    <h2>macOS or Linux: paste into Terminal on that PC</h2>
+    <h2>Telemetry, macOS or Linux: paste into Terminal on that PC</h2>
     <div class="cmd"><pre><code id="sh"></code></pre><button type="button" class="btn ghost copy" data-for="sh">Copy</button></div>
 
-    <h2>Or edit the settings file by hand</h2>
+    <h2>Telemetry by hand: edit the settings file</h2>
     <p class="small">Merge this into <code>%USERPROFILE%\.claude\settings.json</code> on Windows or <code>~/.claude/settings.json</code> on macOS and Linux, keeping whatever else is in the file. It must be this user-level file: Claude Code ignores telemetry settings placed in a project&rsquo;s <code>.claude/settings.json</code>.</p>
     <div class="cmd"><pre><code id="js"></code></pre><button type="button" class="btn ghost copy" data-for="js">Copy</button></div>
 
     <h2>Then</h2>
     <ol>
-      <li>Close Claude Code on that PC and start it again. The settings are read at start.</li>
-      <li>After its next prompt, the PC appears on <a id="dash" href="/">the dashboard</a> within about a minute, as &ldquo;<span id="lbl"></span> &middot; <em>PC name</em>&rdquo;.</li>
-      <li>Nothing appears? Start Claude Code once as <code>CLAUDE_CODE_OTEL_DIAG_STDERR=1 claude</code> (PowerShell: <code>$env:CLAUDE_CODE_OTEL_DIAG_STDERR=1; claude</code>) and read the exporter errors it prints. A wrong key gives 401; a wrong address gives a connection error.</li>
+      <li>Close Claude Code on that PC and start it again. Both ways are read at start.</li>
+      <li>With the agent, the PC and its history appear on <a id="dash" href="/">the dashboard</a> within a minute of the next session starting, as &ldquo;<span id="lbl"></span> &middot; <em>PC name</em>&rdquo;. With telemetry, it appears after the next prompt.</li>
+      <li>Agent not showing? In Claude Code type <code>/mcp</code> to see whether <code>claude-usage</code> connected, or ask Claude to run <code>usage_status</code>. Telemetry not showing? Start Claude Code once as <code>CLAUDE_CODE_OTEL_DIAG_STDERR=1 claude</code> (PowerShell: <code>$env:CLAUDE_CODE_OTEL_DIAG_STDERR=1; claude</code>) and read the exporter errors. A wrong key gives 401; a wrong address gives a connection error.</li>
     </ol>
-    <p class="small">Each PC gets its own <code>member.id</code> (person@pc-name), so the same person on two PCs shows as two rows. Running the command again on the same PC updates it in place. Only token counts, model names, costs and session ids are sent; prompts and responses are not.</p>
+    <p class="small">Each PC gets its own id (person@pc-name), so the same person on two PCs shows as two rows. Running a command again on the same PC updates it in place. Only token counts, model names, costs and session ids leave the PC; prompts and responses do not.</p>
   </div>
 </div>
 <script>
@@ -106,6 +114,16 @@ a { color: inherit; }
       "Object.assign(s.env,{CLAUDE_CODE_ENABLE_TELEMETRY:\"1\",OTEL_METRICS_EXPORTER:\"none\",OTEL_LOGS_EXPORTER:\"otlp\",OTEL_EXPORTER_OTLP_PROTOCOL:\"http/json\",OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:\"" + endpoint + "\",OTEL_RESOURCE_ATTRIBUTES:\"member.name=" + n + ",member.id=" + s + "@\"+h.toLowerCase()+\",member.host=\"+h,OTEL_EXPORTER_OTLP_HEADERS:\"x-api-key=" + key + "\"});" +
       "fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,JSON.stringify(s,null,2)+\"\\n\");console.log(\"Saved \"+p+\" for \"+h+\". Quit Claude Code and start it again; this PC appears on the dashboard after its next prompt.\")'";
     var id = s + '@' + (host ? slug(host) : 'pc-' + Math.random().toString(16).slice(2, 8));
+    /* the usage agent: download from this server, register with claude mcp add for every project (user scope) */
+    var aps = "$d=Join-Path $env:USERPROFILE '.claude-usage';New-Item -ItemType Directory -Force -Path $d|Out-Null;$f=Join-Path $d 'agent.js';Invoke-WebRequest -UseBasicParsing -Uri '" + base + "/agent.js' -OutFile $f;" +
+      "if(-not (Get-Command node -ErrorAction SilentlyContinue)){'Node.js was not found. Install the LTS version from https://nodejs.org, open a NEW PowerShell window and paste again.'}else{" +
+      "claude mcp remove -s user claude-usage 2>$null|Out-Null;claude mcp add -s user -e USAGE_URL=" + base + " -e USAGE_KEY=" + key + " -e USAGE_MEMBER=" + n + " claude-usage -- node $f;" +
+      "$env:USAGE_URL='" + base + "';$env:USAGE_KEY='" + key + "';$env:USAGE_MEMBER='" + n + "';node $f --once;'Installed. Every new Claude Code session on this PC now reports its usage.'}";
+    var ash = "d=\"$HOME/.claude-usage\"; mkdir -p \"$d\" && curl -fsSL '" + base + "/agent.js' -o \"$d/agent.js\" && (claude mcp remove -s user claude-usage >/dev/null 2>&1 || true) && " +
+      "claude mcp add -s user -e USAGE_URL=" + base + " -e USAGE_KEY=" + key + " -e USAGE_MEMBER=" + n + " claude-usage -- node \"$d/agent.js\" && " +
+      "USAGE_URL=" + base + " USAGE_KEY=" + key + " USAGE_MEMBER=" + n + " node \"$d/agent.js\" --once && echo 'Installed. Every new Claude Code session on this PC now reports its usage.'";
+    $('aps').textContent = aps;
+    $('ash').textContent = ash;
     $('ps').textContent = ps;
     $('sh').textContent = sh;
     $('js').textContent = JSON.stringify({ env: envBlock(who, id, host, key) }, null, 2);

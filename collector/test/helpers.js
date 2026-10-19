@@ -11,7 +11,7 @@ function tmpdir(prefix) { return fs.mkdtempSync(path.join(os.tmpdir(), prefix ||
 
 /* start the collector on a free port with the given environment; resolves with { port, url, proc, stop, out } */
 function start(extraEnv) {
-  const env = Object.assign({}, process.env, { PORT: '0', INGEST_KEY: 'ingest-secret-1234', READ_KEY: 'read-secret-1234', SAVE_DELAY_MS: '20' }, extraEnv || {});
+  const env = Object.assign({}, process.env, { PORT: '0', INGEST_KEY: 'ingest-secret-1234', READ_KEY: 'read-secret-1234', SAVE_DELAY_MS: '20', PRICES_URL: 'off' }, extraEnv || {});
   const proc = spawn(process.execPath, [SERVER], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [];
   return new Promise((resolve, reject) => {
