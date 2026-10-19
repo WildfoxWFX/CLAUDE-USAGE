@@ -33,7 +33,33 @@ Steps:
 Do not change the application code. If a step fails, show me the command and its error and stop there.
 ```
 
-## 2. Each PC
+## 2. Prompt for Claude Code on each PC
+
+Alternative to the setup page: start `claude` on the PC (any folder), fill in the three values and paste. One PC at a time; the name is the person who uses that PC.
+
+```
+Install the team's Claude usage agent on this PC. It is a small MCP server (one Node.js file) that Claude Code starts with every session; it reads this PC's own Claude Code logs and sends daily totals to our collector. Run the commands yourself and check each step.
+
+Values:
+- Collector address: <ADDRESS>            (for example https://usage.yourcompany.com, no path, no trailing slash)
+- Ingest key: <INGEST_KEY>
+- Who uses this PC: <NAME>                (one word, or percent-encode spaces: Harsh%20Patel)
+
+Steps:
+1. Confirm Node.js 18 or newer with `node --version`. If it is missing, stop and tell me to install the LTS from https://nodejs.org, then open a new terminal and paste this prompt again.
+2. Confirm the collector answers: GET <ADDRESS>/healthz must return JSON with "ok":true (curl or Invoke-WebRequest). If not, stop and show me the error.
+3. Download <ADDRESS>/agent.js into the folder .claude-usage inside my user profile (%USERPROFILE%\.claude-usage\agent.js on Windows, ~/.claude-usage/agent.js on macOS and Linux), creating the folder. Do not modify the file.
+4. Register it for every project (user scope). First run `claude mcp remove -s user claude-usage` and ignore an error saying it does not exist. Then run, with the real full path to agent.js and this PC's computer name as USAGE_HOST:
+   claude mcp add -s user claude-usage -e USAGE_URL=<ADDRESS> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<NAME> -e USAGE_HOST=<this PC's name> -- node <full path to agent.js>
+   The server name comes right after `add`, before the -e pairs; the CLI rejects the other order.
+5. Send this PC's history now: run `node <full path to agent.js> --once` with USAGE_URL, USAGE_KEY, USAGE_MEMBER and USAGE_HOST set in the environment to the same values. Show me its output; it should say how many log files it scanned and that it sent rows to the collector. If it says "Not sent", show me the error and stop.
+6. Confirm with `claude mcp get claude-usage` that the server is registered with those environment values.
+7. Tell me: the registration is done, the first sync result, and that I must close Claude Code and start it again so the new session loads the server; after that `/mcp` lists claude-usage, and asking "how much did the team use Claude this week?" calls its usage_summary tool.
+
+Do not change any other Claude Code settings or MCP servers, and do not edit agent.js.
+```
+
+## 3. Each PC by hand
 
 Open the setup page the VPS printed (`/setup?key=READ_KEY`) in a browser on any machine. Type who uses the PC, paste the `INGEST_KEY`, click **Make the commands**, copy the **Usage agent, Windows** command and paste it into PowerShell on that PC. It downloads the agent from the VPS and registers it with `claude mcp add`. Then close Claude Code on that PC and start it again.
 
@@ -47,7 +73,7 @@ Check on the PC, inside Claude Code: `/mcp` lists `claude-usage` as connected, a
 
 macOS or Linux PCs: use the **Usage agent, macOS or Linux** command from the same page.
 
-## What runs where
+## 4. What runs where
 
 | Where | What | Runs when |
 | --- | --- | --- |
