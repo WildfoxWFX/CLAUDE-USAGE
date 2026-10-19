@@ -1,0 +1,8 @@
+data/
+node_modules/
+usage_*.json
+*.log
+.DS_Store
+# never commit a real settings.json: it holds the ingest key
+settings.json
+!docs/settings.example.json

@@ -1,0 +1,12 @@
+{
+  "name": "claude-usage-collector",
+  "version": "1.0.0",
+  "description": "Receives Claude Code OpenTelemetry usage events from every PC and serves one usage dashboard",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "start": "node collector/server.js",
+    "test": "node --test collector/test/*.test.js"
+  }
+}

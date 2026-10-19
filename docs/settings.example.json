@@ -1,0 +1,11 @@
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "none",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "https://YOUR-COLLECTOR.example.com/v1/logs",
+    "OTEL_RESOURCE_ATTRIBUTES": "member.name=PERSON,member.id=PERSON@PC-NAME,member.host=PC-NAME",
+    "OTEL_EXPORTER_OTLP_HEADERS": "x-api-key=YOUR-INGEST-KEY"
+  }
+}

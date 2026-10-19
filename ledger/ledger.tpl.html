@@ -1,0 +1,1660 @@
+<title>Claude Usage Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a ruled ledger. Monochrome chrome on a paper plane, so the model colours are the only loud thing on the page.
+   Sections are separated by rules, not boxed; only the chart sits on its own surface. */
+:root {
+  --plane: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink2: #52514e;
+  --muted: #6f6d67;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --hair: rgba(11,11,11,.10);
+  --hair2: rgba(11,11,11,.24);
+  --good: #006300;
+  --bad: #b42323;
+  --focus: #2a78d6;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --sx: #898781;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #9a988f;
+    --grid: #2c2c2a; --axis: #383835; --hair: rgba(255,255,255,.10); --hair2: rgba(255,255,255,.24);
+    --good: #0ca30c; --bad: #ef7b7b; --focus: #6da7ec;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --sx: #898781;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #9a988f;
+  --grid: #2c2c2a; --axis: #383835; --hair: rgba(255,255,255,.10); --hair2: rgba(255,255,255,.24);
+  --good: #0ca30c; --bad: #ef7b7b; --focus: #6da7ec;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --sx: #898781;
+  color-scheme: dark;
+}
+body { background: var(--plane); color: var(--ink); font: 400 14px/1.5 var(--sans); }
+*, *::before, *::after { box-sizing: border-box; }
+.page { max-width: 1120px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 32px); padding-block: 28px 56px; }
+h1, h2, h3, p, ul { margin: 0; }
+h1 { font: 600 30px/1.1 var(--sans); letter-spacing: -.015em; text-wrap: balance; }
+h2 { font: 600 17px/1.3 var(--sans); text-wrap: balance; }
+h3 { font: 600 14px/1.3 var(--sans); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+/* header */
+.top { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,26rem); gap: 12px 40px; align-items: end; padding-bottom: 16px; border-bottom: 2px solid var(--ink); }
+.range { margin-top: 8px; font: 400 13px/1.4 var(--mono); color: var(--ink2); }
+.costnote { font-size: 13px; color: var(--ink2); max-width: 60ch; }
+.seednote { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--hair2); border-radius: 4px; font-size: 13px; color: var(--ink2); max-width: 78ch; }
+.seednote b { color: var(--ink); font-weight: 600; }
+@media (max-width: 760px) { .top { grid-template-columns: minmax(0,1fr); } }
+
+/* controls */
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding-block: 16px; }
+.flabel { font-size: 12px; color: var(--ink2); }
+.flabel a { color: var(--ink); text-underline-offset: 2px; }
+select, input[type="text"], input[type="file"] {
+  font: 400 14px/1.3 var(--sans); color: var(--ink); background: var(--surface);
+  border: 1px solid var(--hair2); border-radius: 4px; padding: 8px 10px; min-height: 38px; max-width: 100%;
+}
+select { min-width: min(100%, 18rem); }
+input[type="file"] { padding: 4px 6px; font-size: 13px; }
+input[type="file"]::file-selector-button { font: 500 13px var(--sans); color: var(--ink); background: transparent; border: 1px solid var(--hair2); border-radius: 3px; padding: 5px 10px; margin-right: 10px; cursor: pointer; }
+input[aria-invalid="true"] { border-color: var(--bad); }
+.btn { font: 500 14px/1.2 var(--sans); color: var(--plane); background: var(--ink); border: 1px solid var(--ink); border-radius: 4px; padding: 9px 16px; min-height: 38px; cursor: pointer; }
+.btn.ghost { color: var(--ink); background: transparent; border-color: var(--hair2); }
+.btn.sm { padding: 5px 10px; min-height: 30px; font-size: 13px; }
+.btn:hover { opacity: .88; }
+.btn:disabled, .btn:disabled:hover, select:disabled, input:disabled { opacity: .45; cursor: not-allowed; }
+.seg { display: inline-flex; border: 1px solid var(--hair2); border-radius: 4px; overflow: hidden; }
+.seg button { font: 500 13px/1.2 var(--sans); color: var(--ink2); background: transparent; border: 0; border-left: 1px solid var(--hair2); padding: 8px 12px; min-height: 34px; cursor: pointer; }
+.seg button:first-child { border-left: 0; }
+.seg button[aria-pressed="true"] { color: var(--plane); background: var(--ink); }
+.seg button:focus-visible { outline-offset: -2px; }
+
+/* summary strip */
+.strip { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); }
+.tile { background: var(--plane); padding: 14px 14px 16px; min-width: 0; }
+.tile .k { font-size: 12px; color: var(--ink2); }
+.tile .v { margin-top: 4px; font: 600 28px/1.1 var(--sans); letter-spacing: -.01em; overflow-wrap: anywhere; }
+.tile .s { margin-top: 6px; font-size: 12px; color: var(--muted); }
+@media (max-width: 820px) { .strip { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+
+/* sections */
+.sec { margin-top: 40px; }
+.sec-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding-bottom: 10px; }
+.sec-head .meta { font: 400 12px var(--mono); color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.tablewrap { overflow-x: auto; border-top: 2px solid var(--ink); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 9px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+th { font-weight: 500; font-size: 12px; color: var(--ink2); border-bottom: 1px solid var(--hair2); }
+th.l { text-align: left; }
+th.rowh { font-weight: inherit; color: inherit; font-size: 13px; text-align: left; white-space: normal; overflow-wrap: anywhere; max-width: 320px; border-bottom: 1px solid var(--hair); }
+th.rowh.hassys { min-width: min(190px, 45vw); }
+@media (max-width: 560px) { th.rowh { max-width: 45vw; } }
+.pcsys { display: block; margin-top: 2px; font: 400 12px/1.4 var(--sans); color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
+th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--plane); z-index: 1; padding-left: 0; }
+td.n, td.num { font: 400 13px var(--mono); font-variant-numeric: tabular-nums; }
+tr.tot td, tr.tot th { font-weight: 600; border-top: 1px solid var(--ink); border-bottom: 0; color: var(--ink); font-size: 13px; }
+tr.cur td:first-child, tr.cur th:first-child { box-shadow: inset 3px 0 0 var(--ink); padding-left: 10px; }
+tr.cur td { font-weight: 600; }
+.mname { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; }
+.sw { width: 10px; height: 10px; border-radius: 2px; flex: none; background: var(--c, var(--sx)); }
+.sharecell { display: flex; align-items: center; gap: 10px; min-width: 150px; }
+.bar { flex: 1; height: 8px; background: var(--grid); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--c, var(--sx)); border-radius: 0 4px 4px 0; }
+.pct { width: 44px; text-align: right; font: 400 12px var(--mono); color: var(--ink2); }
+.empty { padding: 20px 0; color: var(--ink2); }
+td.empty { text-align: left; white-space: normal; }
+
+/* chart */
+.chartcard { background: var(--surface); border: 1px solid var(--hair); border-radius: 6px; padding: 14px 14px 10px; }
+.chart-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; list-style: none; padding: 0; font-size: 12px; color: var(--ink2); }
+.legend li { display: inline-flex; align-items: center; gap: 6px; }
+.readout { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--hair); border-radius: 4px; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.3fr); gap: 10px 28px; background: var(--plane); }
+.ro-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.ro-head strong { font-weight: 600; }
+.tag { font: 500 11px/1 var(--sans); letter-spacing: .04em; text-transform: uppercase; color: var(--plane); background: var(--ink); padding: 4px 6px; border-radius: 3px; }
+.ro-sums { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 8px; font-size: 12px; color: var(--ink2); }
+.ro-sums b { font: 500 13px var(--mono); color: var(--ink); font-weight: 500; }
+.ro-sums .on b { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.ro-rows { list-style: none; padding: 0; display: grid; gap: 4px; align-content: start; }
+.ro-rows li { display: grid; grid-template-columns: 10px minmax(0,1fr) auto 44px; gap: 8px; align-items: center; font-size: 13px; }
+.ro-rows .v { font: 600 13px var(--mono); }
+.ro-rows .p { font: 400 12px var(--mono); color: var(--ink2); text-align: right; }
+@media (max-width: 640px) { .readout { grid-template-columns: minmax(0,1fr); } }
+.chartgrid { display: grid; grid-template-columns: auto minmax(0,1fr); margin-top: 12px; }
+.plotscroll { overflow-x: auto; overflow-y: hidden; }
+.plot, .yaxis { display: block; }
+.plot { touch-action: pan-x pan-y; cursor: crosshair; }
+.tick { font: 400 11px var(--sans); fill: var(--muted); }
+.tick.mono { font-family: var(--mono); }
+details.tableview { margin-top: 10px; font-size: 13px; }
+details.tableview summary { cursor: pointer; color: var(--ink2); padding: 4px 0; }
+details.tableview .tablewrap { max-height: 280px; overflow-y: auto; margin-top: 6px; }
+
+/* add a PC */
+.alt { margin-top: 12px; max-width: 760px; }
+.alt summary { cursor: pointer; font-size: 13px; color: var(--ink2); padding: 4px 0; }
+.cmd { display: flex; align-items: stretch; gap: 8px; margin-top: 12px; max-width: 760px; }
+.cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font: 400 13px/1.4 var(--mono); background: var(--surface); border: 1px solid var(--hair2); border-radius: 4px; padding: 9px 12px; }
+.addform { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px 14px; margin-top: 16px; max-width: 760px; }
+.addform label { display: grid; gap: 4px; font-size: 12px; color: var(--ink2); min-width: 0; }
+.addform .wide { grid-column: 1 / -1; }
+.addform input { width: 100%; }
+.addrow { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; }
+@media (max-width: 560px) { .addform { grid-template-columns: minmax(0,1fr); } }
+.msg { margin-top: 12px; font-size: 13px; max-width: 760px; }
+.msg.ok { color: var(--good); }
+.msg.err { color: var(--bad); }
+.msg ul { padding-left: 18px; margin-top: 4px; color: var(--ink2); }
+.help { margin-top: 10px; font-size: 13px; color: var(--ink2); max-width: 70ch; }
+.pclist { list-style: none; padding: 0; margin-top: 8px; border-top: 1px solid var(--hair2); max-width: 760px; }
+.pclist li { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--hair); }
+.pclist .who { flex: 1 1 0; min-width: 0; }
+.pclist .who b { font-weight: 600; overflow-wrap: anywhere; }
+.pclist .who .sys { font: 400 12px/1.4 var(--sans); color: var(--ink2); overflow-wrap: anywhere; margin-top: 2px; }
+.pclist .who span { display: block; font: 400 12px var(--mono); color: var(--muted); }
+
+.livetag { font: 500 11px/1 var(--mono); color: var(--good); border: 1px solid currentColor; border-radius: 3px; padding: 4px 6px; margin-top: 3px; white-space: nowrap; }
+body.embedded #addsec, body.embedded #liveform, body.embedded #livehelp { display: none; }
+footer { margin-top: 44px; padding-top: 14px; border-top: 1px solid var(--hair2); font-size: 12px; color: var(--muted); }
+footer p { max-width: 90ch; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="page">
+  <header class="top">
+    <div>
+      <h1>Claude Usage Ledger</h1>
+      <p class="range" id="range"></p>
+    </div>
+    <p class="costnote">Costs are API list-price estimates worked out from token counts. A Max plan is not billed per token, so these figures are not what you pay.</p>
+  </header>
+  <p class="seednote" id="seednote" hidden></p>
+
+  <div class="filters">
+    <label class="flabel" for="pcsel">PC / IP</label>
+    <select id="pcsel" aria-describedby="pchint"></select>
+    <span class="flabel" id="pchint">Filters the summary, the model table and the daily chart.</span>
+  </div>
+
+  <section class="strip" id="strip" aria-label="Summary"></section>
+
+  <section class="sec" aria-labelledby="h-models">
+    <div class="sec-head"><h2 id="h-models">Usage by model</h2><span class="meta" id="models-meta"></span></div>
+    <div class="tablewrap">
+      <table id="modeltbl">
+        <thead><tr>
+          <th scope="col">Model</th><th scope="col">Est. cost</th><th scope="col" class="l">Share of cost</th>
+          <th scope="col">Output</th><th scope="col">Input</th><th scope="col">Cache write</th><th scope="col">Cache read</th><th scope="col">All tokens</th>
+        </tr></thead>
+        <tbody id="modelbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-daily">
+    <div class="sec-head"><h2 id="h-daily">Daily usage by model</h2><div class="seg" data-metric-toggle role="group" aria-label="Chart metric"></div></div>
+    <div class="chartcard">
+      <ul class="legend" id="legend" aria-label="Models"></ul>
+      <div class="readout" id="readout" aria-live="polite"></div>
+      <div id="chartbody"></div>
+      <details class="tableview">
+        <summary>Show the daily figures as a table</summary>
+        <div class="tablewrap"><table><thead><tr><th scope="col">Day</th><th scope="col">Est. cost</th><th scope="col">Output</th><th scope="col">All tokens</th></tr></thead><tbody id="dailybody"></tbody></table></div>
+      </details>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-matrix">
+    <div class="sec-head"><h2 id="h-matrix">PC / IP by model</h2><div class="seg" data-metric-toggle role="group" aria-label="Table metric"></div></div>
+    <div class="tablewrap"><table id="matrix"><thead id="matrixhead"></thead><tbody id="matrixbody"></tbody></table></div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-live" id="livesec">
+    <div class="sec-head"><h2 id="h-live">Live usage from every PC</h2><span class="meta" id="live-meta"></span></div>
+    <p class="help" id="livehelp">Instead of exporting files, each PC can report by itself: Claude Code sends its usage, as it happens, to a small collector you run (the <code>collector</code> folder in the repository: one click to deploy on Render, or <code>node collector/server.js</code> on any always-on PC). The collector&rsquo;s setup page writes each PC&rsquo;s settings for you. Paste the collector&rsquo;s address and read key here, and this page shows every PC that reports to it, refreshed every minute.</p>
+    <form class="addform" id="liveform" novalidate>
+      <label class="wide" for="liveurl">Collector address<input type="url" id="liveurl" placeholder="https://claude-usage-collector.onrender.com" autocomplete="off" maxlength="300" spellcheck="false"></label>
+      <label class="wide" for="livekey">Read key (READ_KEY)<input type="password" id="livekey" placeholder="leave empty if the collector has no READ_KEY" autocomplete="off" maxlength="300"></label>
+      <div class="addrow"><button type="submit" class="btn" id="livebtn">Connect</button><button type="button" class="btn ghost" id="livedrop" hidden>Disconnect</button></div>
+    </form>
+    <p class="help" id="livenote" role="status"></p>
+  </section>
+
+  <section class="sec" aria-labelledby="h-add" id="addsec">
+    <div class="sec-head"><h2 id="h-add">Add another PC</h2></div>
+    <p class="help">Without a collector, a PC can still be added by hand. On each PC (it needs Node.js from nodejs.org), paste this into PowerShell. It writes <code>usage_&lt;PC name&gt;.json</code> in the current folder, with the PC&rsquo;s name, IP address and system details inside. Then open this page on that PC, choose the file and click Add PC: the form fills itself in from the file. Several PCs? Choose all their files at once: each file names its own PC, so one click adds them all. Files that do not come from this command all go into the one PC named in the form. The file itself is read in your browser and is never uploaded; only the daily totals in it are saved (see below). Only Claude models are kept.</p>
+    <div class="cmd">
+      <code id="cmdbundle">$n=$env:COMPUTERNAME;$ip=$null;$r=Get-NetRoute -DestinationPrefix 0.0.0.0/0|Sort-Object RouteMetric|Select-Object -First 1;if($r){$ip=(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex|Select-Object -First 1).IPAddress};if(-not $ip){$ip=(Get-NetIPAddress -AddressFamily IPv4|Where-Object{$_.IPAddress -notmatch '^(127|169\.254)\.'}|Select-Object -First 1).IPAddress};$o=Get-CimInstance Win32_OperatingSystem;$c=Get-CimInstance Win32_Processor|Select-Object -First 1;$s=Get-CimInstance Win32_ComputerSystem;$sys="$($o.Caption.Trim()) | $($c.Name.Trim()), $($s.NumberOfLogicalProcessors) threads | $([int]($s.TotalPhysicalMemory/1GB)) GB RAM";$x=$null;foreach($k in 'npx.cmd','npx.exe','npx'){if(-not $x){$g=Get-Command $k -ErrorAction SilentlyContinue|Select-Object -First 1;if($g){$x=$g.Source}}};if(-not $x){'Node.js was not found. Install the LTS version from https://nodejs.org, then close this window, open a NEW PowerShell window and paste the command again.'}else{'Collecting usage with ccusage. The first run downloads it and can take a minute...';$env:npm_config_update_notifier='false';$u=(&amp; $x -y ccusage@latest daily --breakdown --json) -join "`n";if($u -notmatch '"model(Name)?"\s*:'){if($u -match '\{'){'ccusage ran but found no Claude Code usage for this Windows user (it looks in %USERPROFILE%\.claude, or in CLAUDE_CONFIG_DIR if set). Claude Code used inside WSL or by another Windows user is not seen.'}else{'ccusage did not return any data. Read the message above, then try again.'}}elseif($u -match '(?s)\{.*\}'){$pc=@{name=$n;ip=$ip;system=$sys}|ConvertTo-Json -Compress;$f=Join-Path $PWD "usage_$n.json";try{Set-Content -LiteralPath $f -Value "{`"pc`":$pc,`"usage`":$($Matches[0])}" -Encoding UTF8 -ErrorAction Stop;"Wrote $f"}catch{"Could not save $f : $($_.Exception.Message)"}}else{'ccusage did not return any data. Read the message above, then try again.'}}</code>
+      <button type="button" class="btn ghost" id="copybundle" aria-label="Copy the collector command">Copy</button>
+    </div>
+    <details class="alt">
+      <summary>Prefer to type the name, IP and system yourself?</summary>
+      <p class="help">Run this instead (replace NAME with the PC&rsquo;s name), choose the file, and fill in the fields below. If Windows PowerShell says running scripts is disabled, type <code>npx.cmd</code> instead of <code>npx</code>.</p>
+      <div class="cmd">
+        <code id="cmdtext">npx ccusage@latest daily --breakdown --json &gt; usage_NAME.json</code>
+        <button type="button" class="btn ghost" id="copybtn" aria-label="Copy the ccusage command">Copy</button>
+      </div>
+    </details>
+    <form class="addform" id="addform" novalidate>
+      <label for="pcname">PC name<input type="text" id="pcname" placeholder="OFFICE-PC" autocomplete="off" maxlength="60"></label>
+      <label for="pcip">IP address<input type="text" id="pcip" placeholder="192.168.1.20" autocomplete="off" maxlength="45"></label>
+      <label class="wide" for="pcsys">System details (optional)<input type="text" id="pcsys" placeholder="Windows 11 Pro | Ryzen 7, 16 threads | 32 GB RAM" autocomplete="off" maxlength="160"></label>
+      <label class="wide" for="pcfiles">Usage files (one or more .json files)<input type="file" id="pcfiles" multiple accept=".json,application/json"></label>
+      <p class="help wide" id="filehint" aria-live="polite" hidden></p>
+      <div class="addrow"><button type="submit" class="btn" id="addbtn">Add PC</button></div>
+    </form>
+    <div class="msg" id="addmsg" role="status"></div>
+    <p class="help">Adding again with the same name and IP merges into that row. Days and models already on file are replaced by the newer file, so re-adding a fresh export never double counts. System details you type replace the earlier ones; leave the field empty to keep them. To keep two installs on one PC apart, give them different names.</p>
+    <p class="help" id="storemode" aria-live="polite"></p>
+    <p class="help" id="migrate" hidden></p>
+    <h3 style="margin-top:20px">PCs on this page</h3>
+    <ul class="pclist" id="pclist"></ul>
+    <p class="help" id="savenote" role="status" hidden>This browser blocked storage, so the PCs you add will be lost when you reload the page.</p>
+    <div class="addrow" style="margin-top:12px"><button type="button" class="btn ghost sm" id="resetbtn">Reset to the built-in data</button></div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-sess">
+    <div class="sec-head"><h2 id="h-sess">Largest sessions</h2><span class="meta" id="sess-meta"></span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th scope="col">Session</th><th scope="col" class="l">PC / IP</th><th scope="col" class="l">Last active</th><th scope="col" class="l">Models</th>
+          <th scope="col">Output</th><th scope="col">All tokens</th><th scope="col">Est. cost</th>
+        </tr></thead>
+        <tbody id="sessbody"></tbody>
+      </table>
+    </div>
+    <p class="help">Sessions come from the session log of the PC the page was built on. Files you add contain daily totals only, so they have no session rows.</p>
+  </section>
+
+  <footer><p>Claude Code only. Chats on claude.ai are not counted. Claude does not record IP addresses: the IP shown is a label you type in, or the address the collector saw a PC connect from.</p></footer>
+</div>
+
+<script>
+(function () {
+'use strict';
+var SEED = /*__SEED__*/null;
+var LIVE_CFG = /*__LIVE__*/null; /* set by the collector when it serves this page itself */
+var EMBEDDED = !!(LIVE_CFG && typeof LIVE_CFG === 'object' && LIVE_CFG.embedded === true);
+
+/* ---------- state ---------- */
+function seedPCs() { return SEED.pcs.map(function (p) { return { label: p.label, rows: p.rows.slice(), seed: true, system: p.system || '' }; }); }
+var PCS = seedPCs();
+var state = { pc: '*', metric: 'cost', sel: null };
+var METRICS = [['cost', 'Cost'], ['all', 'All tokens'], ['out', 'Output tokens']];
+var OTHER = '__other__';
+var CH = null;
+/* PCs reported by a collector (see 'Live usage from every PC'): shown live, never stored by this page */
+var live = { cfg: null, pcs: [], sessions: [], status: '', error: '', errStatus: 0, at: 0, timer: 0, seq: 0, busy: false, lastEvent: '', migrated: false, flash: '' };
+
+/* ---------- PCs saved in this browser only ----------
+   Only the PCs the viewer added are stored (plus which built-in PCs they removed and the colour order),
+   never the built-in figures, so a rebuilt page always shows its own current built-in data. */
+var STORE_KEY = 'claude-usage-ledger.pcs.v2';
+var MIN_DATE = '2024-01-01', MAX_DATE = '2100-12-31';
+var storageOK = true;
+var removedSeeds = [];
+var mode = 'local', DB = null, canWrite = true, fallbackNote = '', unsubs = [], colorWrite = false;
+var shared = { pcs: null, rows: null, meta: null };
+function canWriteNow() { return mode !== 'shared' || canWrite; }
+function editable() { return mode !== 'connecting' && canWriteNow(); }
+function validDate(s) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m || s < MIN_DATE || s > MAX_DATE) return false;
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toISOString().slice(0, 10) === s;
+}
+function validNum(x) { return typeof x === 'number' && isFinite(x) && x >= 0 && x <= 1e15; }
+function validRows(rows) {
+  return Array.isArray(rows) && rows.every(function (r) {
+    return Array.isArray(r) && r.length === 7 && typeof r[0] === 'string' && validDate(r[0]) && typeof r[1] === 'string' && r[1].indexOf('claude-') === 0 &&
+      r.slice(2).every(validNum);
+  });
+}
+function readStore() {
+  try {
+    var raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    if (!o || typeof o !== 'object' || !Array.isArray(o.pcs)) return null;
+    var pcs = [];
+    o.pcs.forEach(function (p) {
+      if (!p || typeof p.label !== 'string' || !p.label || !validRows(p.rows)) return;
+      pcs.push({ label: p.label, rows: p.rows, seed: false, onto: p.onto === true, system: typeof p.system === 'string' ? p.system : '' });
+    });
+    var strs = function (a, prefix) { return Array.isArray(a) ? a.filter(function (x) { return typeof x === 'string' && x.indexOf(prefix) === 0; }) : []; };
+    return { pcs: pcs, removedSeeds: strs(o.removedSeeds, ''), colors: strs(o.colors, 'claude-') };
+  } catch (e) { return null; }
+}
+function indexByLabel(list, label) {
+  var l = label.toLowerCase();
+  for (var i = 0; i < list.length; i++) if (list[i].label.toLowerCase() === l) return i;
+  return -1;
+}
+function mergeRows(base, over) {
+  var m = new Map();
+  base.forEach(function (r) { m.set(r[0] + '|' + r[1], r); });
+  over.forEach(function (r) { m.set(r[0] + '|' + r[1], r); });
+  return Array.from(m.values());
+}
+/* built-in PCs (minus the ones the viewer removed) plus the saved ones.
+   A saved PC with a built-in PC's label either layers its own rows over the fresh built-in rows (onto) or replaces it. */
+function buildPCs(saved) {
+  var out = seedPCs();
+  if (saved) {
+    out = out.filter(function (p) { return saved.removedSeeds.indexOf(p.label.toLowerCase()) < 0; });
+    saved.pcs.forEach(function (p) {
+      var i = indexByLabel(out, p.label), live = i >= 0 ? out[i] : null;
+      if (p.onto && live) out[i] = { label: live.label, rows: mergeRows(live.rows, p.rows), seed: false, own: p.rows, sysTyped: p.system, system: p.system || live.system };
+      else {
+        var plain = { label: p.label, rows: p.rows, seed: false, system: p.system };
+        if (live) out[i] = plain; else out.push(plain);
+      }
+    });
+  }
+  /* PCs the collector reports: a live PC with a saved PC's label stands in for it */
+  live.pcs.forEach(function (p) {
+    var i = indexByLabel(out, p.label), lp = { label: p.label, rows: p.rows, seed: false, live: true, system: p.system };
+    if (i >= 0) out[i] = lp; else out.push(lp);
+  });
+  return out;
+}
+function applySaved() {
+  var saved = readStore();
+  removedSeeds = saved ? saved.removedSeeds : [];
+  PCS = buildPCs(saved);
+  return saved;
+}
+function saveState() {
+  if (mode !== 'local' || EMBEDDED) return; /* shared mode saves through the db, never to this browser; the collector's own page stores nothing */
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({ v: 2, pcs: PCS.filter(function (p) { return !p.seed; }).map(function (p) { return p.own ? { label: p.label, onto: true, rows: p.own, system: p.sysTyped || '' } : { label: p.label, rows: p.rows, system: p.system }; }), removedSeeds: removedSeeds, colors: Array.from(reg.keys()) }));
+    storageOK = true;
+  } catch (e) { storageOK = false; }
+}
+var initialSaved = EMBEDDED ? null : applySaved();
+
+/* ---------- helpers ---------- */
+function $(id) { return document.getElementById(id); }
+function h(tag, props) {
+  var e = document.createElement(tag);
+  if (props) for (var k in props) {
+    var v = props[k];
+    if (k === 'class') e.className = v;
+    else if (k === 'text') e.textContent = v;
+    else if (k.slice(0, 2) === 'on') e.addEventListener(k.slice(2), v);
+    else if (v === true) e.setAttribute(k, '');
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (var i = 2; i < arguments.length; i++) append(e, arguments[i]);
+  return e;
+}
+function append(e, c) {
+  if (c == null || c === false) return;
+  if (Array.isArray(c)) { c.forEach(function (x) { append(e, x); }); return; }
+  e.appendChild(c.nodeType ? c : document.createTextNode(String(c)));
+}
+function s(tag, props) {
+  var e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (var k in props) e.setAttribute(k, props[k]);
+  return e;
+}
+var NF = new Intl.NumberFormat('en-US');
+function fmtInt(n) { return NF.format(Math.round(n)); }
+function trimNum(x) {
+  var t = x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2);
+  return t.indexOf('.') >= 0 ? t.replace(/\.?0+$/, '') : t;
+}
+function fmtCompact(n) {
+  var a = Math.abs(n);
+  if (a >= 1e9) return trimNum(n / 1e9) + 'B';
+  if (a >= 1e6) return trimNum(n / 1e6) + 'M';
+  if (a >= 1e3) return trimNum(n / 1e3) + 'K';
+  return String(Math.round(n));
+}
+function fmtCost(v) {
+  if (v === 0) return '$0.00';
+  if (v < 0.005) return '<$0.01';
+  if (v >= 1000) return '$' + NF.format(Math.round(v));
+  return '$' + v.toFixed(2);
+}
+function fmtVal(v, metric, compact) {
+  if (metric === 'cost') return fmtCost(v);
+  return compact ? fmtCompact(v) : fmtInt(v);
+}
+function fmtPct(x) {
+  if (x >= 10) return Math.round(x) + '%';
+  if (x > 0 && x < 0.1) return '<0.1%';
+  return x.toFixed(1) + '%';
+}
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+function utc(d) { var p = d.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]); }
+function iso(t) { return new Date(t).toISOString().slice(0, 10); }
+function fmtDate(d) {
+  return new Date(utc(d)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+function fmtDay(d) {
+  return new Date(utc(d)).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+/* "claude-opus-5-5" -> "Opus 5.5", "claude-3-5-sonnet-20241022" -> "Sonnet 3.5" */
+function prettyModel(id) {
+  var name = String(id).replace(/^claude-/, '');
+  var extra = '';
+  var br = /\[(.*?)\]/.exec(name);
+  if (br) { extra = ' (' + br[1].toUpperCase() + ')'; name = name.replace(/\[.*?\]/, ''); }
+  var fam = [], ver = [], rest = [];
+  name.split('-').forEach(function (t) {
+    if (!t || /^\d{8}$/.test(t) || t === 'latest') return;
+    if (/^\d{1,2}$/.test(t)) ver.push(t);
+    else if (/^\d+$/.test(t)) rest.push(t);
+    else fam.push(t.charAt(0).toUpperCase() + t.slice(1));
+  });
+  var out = fam.join(' ');
+  if (ver.length) out += (out ? ' ' : '') + ver.join('.');
+  if (rest.length) out += (out ? ' ' : '') + rest.join(' ');
+  return (out || String(id)) + extra;
+}
+
+/* ---------- data ---------- */
+function selectedPCs() { return state.pc === '*' ? PCS : PCS.filter(function (p) { return p.label === state.pc; }); }
+function rowsOf(pcs) { var r = []; pcs.forEach(function (p) { p.rows.forEach(function (x) { r.push(x); }); }); return r; }
+function rowAll(r) { return r[2] + r[3] + r[4] + r[5]; }
+function sumBy(rows, keyFn) {
+  var m = new Map();
+  rows.forEach(function (r) {
+    var k = keyFn(r), a = m.get(k);
+    if (!a) { a = { in: 0, out: 0, cw: 0, cr: 0, cost: 0, all: 0 }; m.set(k, a); }
+    a.in += r[2]; a.out += r[3]; a.cw += r[4]; a.cr += r[5]; a.cost += r[6]; a.all += rowAll(r);
+  });
+  return m;
+}
+function sumAll(rows) {
+  var a = { in: 0, out: 0, cw: 0, cr: 0, cost: 0, all: 0 };
+  rows.forEach(function (r) { a.in += r[2]; a.out += r[3]; a.cw += r[4]; a.cr += r[5]; a.cost += r[6]; a.all += rowAll(r); });
+  return a;
+}
+
+/* Colour follows the model, never its rank: a model keeps its slot even when a filter hides the others. */
+var reg = new Map();
+function register() {
+  var tot = sumBy(rowsOf(PCS), function (r) { return r[1]; });
+  Array.from(tot.entries())
+    .filter(function (e) { return !reg.has(e[0]); })
+    .sort(function (a, b) { return b[1].cost - a[1].cost || (a[0] < b[0] ? -1 : 1); })
+    .forEach(function (e) { reg.set(e[0], reg.size); });
+}
+function colorOf(m) { var i = reg.get(m); return i != null && i < 8 ? 'var(--s' + (i + 1) + ')' : 'var(--sx)'; }
+function rankOf(k) { return k === OTHER ? 99 : (reg.has(k) ? reg.get(k) : 98); }
+function swatch(color) { return h('i', { class: 'sw', style: '--c:' + color }); }
+
+/* ---------- header, filter, summary ---------- */
+function renderHeader() {
+  var rows = rowsOf(selectedPCs());
+  var r = $('range');
+  if (!rows.length) { r.textContent = 'No Claude usage loaded'; }
+  else {
+    var ds = rows.map(function (x) { return x[0]; }).sort();
+    var a = ds[0], b = ds[ds.length - 1];
+    r.textContent = a === b ? fmtDate(a) : fmtDate(a) + ' to ' + fmtDate(b);
+    r.textContent += live.at ? '  |  live, updated ' + fmtTime(live.at) : '  |  generated ' + fmtDate(SEED.generated);
+  }
+  var seed = PCS.filter(function (p) { return p.seed; })[0];
+  var note = $('seednote');
+  if (seed && mode !== 'connecting') {
+    note.hidden = false;
+    note.replaceChildren(h('b', { text: 'Where this data comes from. ' }),
+      'The figures loaded with this page are the Claude Code logs of the cloud machine “' + seed.label +
+      '”' + (seed.system ? ' (' + seed.system + ')' : '') + ' that the page was built on. They are not from your own PC. Add your PC’s files in “Add another PC”, then remove this row.');
+  } else note.hidden = true;
+}
+
+function renderSelect() {
+  var sel = $('pcsel');
+  if (state.pc !== '*' && !PCS.some(function (p) { return p.label === state.pc; })) state.pc = '*';
+  var opts = [h('option', { value: '*', text: 'All PCs (' + PCS.length + ')' })];
+  PCS.forEach(function (p) { opts.push(h('option', { value: p.label, text: p.label })); });
+  sel.replaceChildren.apply(sel, opts);
+  sel.value = state.pc;
+  var hint = $('pchint');
+  if (mode === 'connecting') hint.textContent = 'Loading your PCs from the shared store\u2026';
+  else if (EMBEDDED && PCS.length <= 1) {
+    var setupLink = function () { return h('a', { href: '/setup' + location.search, text: 'setup page' }); };
+    if (!PCS.length) hint.replaceChildren(live.status === 'ok' ? 'No PC has reported yet. Set up each PC from the ' : (live.status === 'error' ? 'The collector could not be read (see below).' : 'Waiting for the collector\u2026'), live.status === 'ok' ? setupLink() : null, live.status === 'ok' ? '.' : null);
+    else hint.replaceChildren('Only one PC has reported so far. Set up the others from the ', setupLink(), '.');
+  }
+  else if (PCS.length <= 1) {
+    hint.replaceChildren(PCS.length ? 'Only one PC is loaded. Add your other PCs under ' : 'No PCs are loaded. Add one under ',
+      h('a', { href: '#h-add', text: 'Add another PC', onclick: function (e) { e.preventDefault(); $('h-add').scrollIntoView({ behavior: window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }); $('pcname').focus({ preventScroll: true }); } }), '.');
+  } else hint.textContent = 'Filters the summary, the model table and the daily chart.';
+}
+
+function tile(k, v, sub, title) {
+  return h('div', { class: 'tile' }, h('div', { class: 'k', text: k }), h('div', { class: 'v', text: v, title: title || null }), h('div', { class: 's', text: sub }));
+}
+function renderSummary() {
+  var rows = rowsOf(selectedPCs());
+  var strip = $('strip');
+  if (!rows.length) {
+    strip.replaceChildren(tile('Estimated cost', '—', 'No data'), tile('Total tokens', '—', 'No data'), tile('Active days', '—', 'No data'), tile('Top model', '—', 'No data'));
+    return;
+  }
+  var t = sumAll(rows), models = sumBy(rows, function (r) { return r[1]; });
+  var days = new Set();
+  rows.forEach(function (r) { if (r[6] > 0 || rowAll(r) > 0) days.add(r[0]); });
+  var ds = rows.map(function (x) { return x[0]; }).sort();
+  var span = Math.round((utc(ds[ds.length - 1]) - utc(ds[0])) / 864e5) + 1;
+  var top = Array.from(models.entries()).sort(function (a, b) { return b[1].cost - a[1].cost || b[1].all - a[1].all; })[0];
+  var share = t.cost > 0 ? top[1].cost / t.cost * 100 : 0;
+  strip.replaceChildren(
+    tile('Estimated cost', fmtCost(t.cost), models.size + (models.size === 1 ? ' model' : ' models') + ', API list price'),
+    tile('Total tokens', fmtCompact(t.all), fmtCompact(t.out) + ' output', fmtInt(t.all) + ' tokens in total, ' + fmtInt(t.out) + ' output'),
+    tile('Active days', String(days.size), 'of ' + span + (span === 1 ? ' calendar day' : ' calendar days') + ' in range'),
+    tile('Top model', prettyModel(top[0]), fmtPct(share) + ' of cost')
+  );
+}
+
+/* ---------- usage by model ---------- */
+function renderModels() {
+  var rows = rowsOf(selectedPCs());
+  var body = $('modelbody');
+  var one = PCS.filter(function (p) { return p.label === state.pc; })[0];
+  $('models-meta').textContent = state.pc === '*' ? 'All PCs' : state.pc + (one && one.system ? ' | ' + one.system : '');
+  if (!rows.length) { body.replaceChildren(h('tr', null, h('td', { class: 'empty', colspan: 8, text: 'No Claude usage on this page. Add a PC below.' }))); return; }
+  var t = sumAll(rows);
+  var list = Array.from(sumBy(rows, function (r) { return r[1]; }).entries()).sort(function (a, b) { return b[1].cost - a[1].cost || b[1].all - a[1].all; });
+  var trs = list.map(function (e) {
+    var m = e[0], a = e[1], share = t.cost > 0 ? a.cost / t.cost * 100 : 0;
+    return h('tr', null,
+      h('td', null, h('span', { class: 'mname', title: m }, swatch(colorOf(m)), prettyModel(m))),
+      h('td', { class: 'num', text: fmtCost(a.cost) }),
+      h('td', null, h('div', { class: 'sharecell' }, h('div', { class: 'bar' }, h('i', { style: 'width:' + Math.max(share, share > 0 ? 1 : 0) + '%;--c:' + colorOf(m) })), h('span', { class: 'pct', text: fmtPct(share) }))),
+      h('td', { class: 'num', text: fmtInt(a.out) }), h('td', { class: 'num', text: fmtInt(a.in) }),
+      h('td', { class: 'num', text: fmtInt(a.cw) }), h('td', { class: 'num', text: fmtInt(a.cr) }), h('td', { class: 'num', text: fmtInt(a.all) }));
+  });
+  trs.push(h('tr', { class: 'tot' },
+    h('td', { text: 'Total' }), h('td', { class: 'num', text: fmtCost(t.cost) }), h('td', null, h('div', { class: 'sharecell' }, h('div'), h('span', { class: 'pct', text: t.cost > 0 ? '100%' : '' }))),
+    h('td', { class: 'num', text: fmtInt(t.out) }), h('td', { class: 'num', text: fmtInt(t.in) }),
+    h('td', { class: 'num', text: fmtInt(t.cw) }), h('td', { class: 'num', text: fmtInt(t.cr) }), h('td', { class: 'num', text: fmtInt(t.all) })));
+  body.replaceChildren.apply(body, trs);
+}
+
+/* ---------- metric toggles ---------- */
+function renderToggles() {
+  Array.prototype.forEach.call(document.querySelectorAll('[data-metric-toggle]'), function (box) {
+    var btns = METRICS.map(function (m) {
+      return h('button', {
+        type: 'button', 'aria-pressed': state.metric === m[0] ? 'true' : 'false', text: m[1],
+        onclick: function () { if (state.metric === m[0]) return; state.metric = m[0]; state.sel = null; renderToggles(); renderChart(); renderMatrix(); }
+      });
+    });
+    box.replaceChildren.apply(box, btns);
+  });
+}
+
+/* ---------- daily stacked chart ---------- */
+var PH = 200, PT = 10, XH = 26, YW = 50, GAP = 2;
+function niceStep(raw) {
+  if (!(raw > 0)) return 1;
+  var p = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), f = raw / p;
+  var m = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
+  return m * p;
+}
+function tickLabel(v, step, metric) {
+  if (v === 0) return metric === 'cost' ? '$0' : '0';
+  if (metric === 'cost') return step < 1 ? '$' + v.toFixed(2) : step >= 1000 ? '$' + fmtCompact(v) : '$' + (+v.toFixed(2));
+  return fmtCompact(v);
+}
+function roundedTop(x, y, w, hgt, r) {
+  return 'M' + x + ',' + (y + hgt) + 'L' + x + ',' + (y + r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + r) + ',' + y +
+    'L' + (x + w - r) + ',' + y + 'A' + r + ',' + r + ' 0 0 1 ' + (x + w) + ',' + (y + r) + 'L' + (x + w) + ',' + (y + hgt) + 'Z';
+}
+
+function renderChart() {
+  var host = $('chartbody'), rows = rowsOf(selectedPCs());
+  CH = null;
+  if (!rows.length) {
+    host.replaceChildren(h('p', { class: 'empty', text: 'No usage to chart yet.' }));
+    $('legend').replaceChildren(); $('readout').replaceChildren(); $('dailybody').replaceChildren();
+    return;
+  }
+  var metric = state.metric;
+  var dmap = new Map(), first = '9999-99-99', last = '0000-00-00';
+  rows.forEach(function (r) {
+    if (r[0] < first) first = r[0];
+    if (r[0] > last) last = r[0];
+    var d = dmap.get(r[0]);
+    if (!d) { d = { cost: 0, all: 0, out: 0, by: new Map() }; dmap.set(r[0], d); }
+    var all = rowAll(r), idx = reg.get(r[1]), key = idx != null && idx < 8 ? r[1] : OTHER;
+    d.cost += r[6]; d.all += all; d.out += r[3];
+    var b = d.by.get(key);
+    if (!b) { b = { cost: 0, all: 0, out: 0 }; d.by.set(key, b); }
+    b.cost += r[6]; b.all += all; b.out += r[3];
+  });
+  var MAXDAYS = 1100, spanDays = Math.round((utc(last) - utc(first)) / 864e5) + 1, capped = spanDays > MAXDAYS;
+  var cal = [];
+  for (var t = capped ? utc(last) - (MAXDAYS - 1) * 864e5 : utc(first); t <= utc(last); t += 864e5) cal.push(iso(t));
+  var keySet = new Set();
+  cal.forEach(function (dt) { var d = dmap.get(dt); if (d) d.by.forEach(function (_, k) { keySet.add(k); }); });
+  var keys = Array.from(keySet).sort(function (a, b) { return rankOf(a) - rankOf(b); });
+
+  var maxV = 0, peak = 0;
+  cal.forEach(function (dt, i) { var d = dmap.get(dt); if (d && d[metric] > maxV) { maxV = d[metric]; peak = i; } });
+  var step = niceStep(maxV / 4), nt = Math.max(1, Math.ceil(maxV / step - 1e-9)), yMax = nt * step;
+
+  var H = PT + PH + XH;
+  var axis = s('svg', { class: 'yaxis', width: YW, height: H, 'aria-hidden': 'true' });
+  var scroll = h('div', { class: 'plotscroll', tabindex: '0', role: 'group', 'aria-label': 'Daily usage by model. Use the left and right arrow keys to move between days.' });
+  host.replaceChildren(h('div', { class: 'chartgrid' }, axis, scroll), capped ? h('p', { class: 'help', text: 'The chart and the daily table show the latest ' + fmtInt(MAXDAYS) + ' of ' + fmtInt(spanDays) + ' days. The figures above still count every day.' }) : null);
+  var avail = Math.max(scroll.clientWidth, 200);
+  var n = cal.length, slot = Math.max(avail / n, 10), W = slot * n, bw = Math.min(24, slot - GAP);
+  var svg = s('svg', { class: 'plot', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H });
+
+  for (var k = 0; k <= nt; k++) {
+    var v = k * step, y = PT + PH - v / yMax * PH;
+    var tx = s('text', { class: 'tick', x: YW - 8, y: y + 4, 'text-anchor': 'end' });
+    tx.textContent = tickLabel(v, step, metric);
+    axis.appendChild(tx);
+    svg.appendChild(s('line', { x1: 0, x2: W, y1: y, y2: y, stroke: k === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1 }));
+  }
+  var band = s('rect', { x: 0, y: PT, width: slot, height: PH, fill: 'var(--grid)', opacity: .7 });
+  svg.insertBefore(band, svg.firstChild);
+
+  cal.forEach(function (dt, i) {
+    var d = dmap.get(dt);
+    if (!d) return;
+    var segs = keys.map(function (key) { return { k: key, v: d.by.has(key) ? d.by.get(key)[metric] : 0 }; }).filter(function (o) { return o.v > 0; });
+    var acc = 0, x = i * slot + (slot - bw) / 2;
+    segs.forEach(function (o, j) {
+      var yb = PT + PH - acc / yMax * PH;
+      acc += o.v;
+      var yt = PT + PH - acc / yMax * PH;
+      if (yb - yt >= 2 * GAP) { if (j < segs.length - 1) yt += GAP / 2; if (j > 0) yb -= GAP / 2; }
+      if (yb - yt < 1) yt = yb - 1;
+      var hh = yb - yt, el;
+      if (j === segs.length - 1) el = s('path', { d: roundedTop(x, yt, bw, hh, Math.min(4, bw / 2, hh)) });
+      else el = s('rect', { x: x, y: yt, width: bw, height: hh });
+      el.style.fill = o.k === OTHER ? 'var(--sx)' : colorOf(o.k);
+      svg.appendChild(el);
+    });
+  });
+
+  var every = Math.max(1, Math.ceil(70 / slot)), multiYear = cal[0].slice(0, 4) !== last.slice(0, 4);
+  cal.forEach(function (dt, i) {
+    if (i % every !== 0) return;
+    var cx = Math.min(Math.max(i * slot + slot / 2, 26), Math.max(W - 26, 26));
+    var tx = s('text', { class: 'tick', x: cx, y: PT + PH + 17, 'text-anchor': 'middle' });
+    tx.textContent = new Date(utc(dt)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: multiYear ? '2-digit' : undefined, timeZone: 'UTC' });
+    svg.appendChild(tx);
+  });
+  svg.appendChild(s('rect', { x: 0, y: 0, width: W, height: PT + PH, fill: 'transparent' }));
+  scroll.appendChild(svg);
+
+  CH = { cal: cal, dmap: dmap, keys: keys, slot: slot, n: n, band: band, scroll: scroll, svg: svg, peak: peak, sel: 0, avail: avail };
+  function pick(e) {
+    var r = svg.getBoundingClientRect();
+    selectDay(Math.min(n - 1, Math.max(0, Math.floor((e.clientX - r.left) / slot))));
+  }
+  svg.addEventListener('pointermove', pick);
+  svg.addEventListener('pointerdown', pick);
+  scroll.addEventListener('keydown', function (e) {
+    var i = CH.sel;
+    if (e.key === 'ArrowLeft') i--; else if (e.key === 'ArrowRight') i++;
+    else if (e.key === 'Home') i = 0; else if (e.key === 'End') i = CH.n - 1; else return;
+    e.preventDefault();
+    i = Math.min(CH.n - 1, Math.max(0, i));
+    selectDay(i);
+    var l = i * slot, rgt = l + slot;
+    if (l < scroll.scrollLeft) scroll.scrollLeft = l; else if (rgt > scroll.scrollLeft + scroll.clientWidth) scroll.scrollLeft = rgt - scroll.clientWidth;
+  });
+
+  var legend = keys.map(function (key) {
+    return h('li', null, swatch(key === OTHER ? 'var(--sx)' : colorOf(key)), key === OTHER ? 'Other models' : prettyModel(key));
+  });
+  $('legend').replaceChildren.apply($('legend'), legend);
+
+  var drows = cal.map(function (dt) {
+    var d = dmap.get(dt) || { cost: 0, out: 0, all: 0 };
+    return h('tr', null, h('td', { text: fmtDay(dt) }), h('td', { class: 'num', text: fmtCost(d.cost) }), h('td', { class: 'num', text: fmtInt(d.out) }), h('td', { class: 'num', text: fmtInt(d.all) }));
+  });
+  $('dailybody').replaceChildren.apply($('dailybody'), drows);
+
+  var idx = state.sel ? cal.indexOf(state.sel) : -1;
+  if (idx < 0) idx = peak;
+  selectDay(idx);
+  if (W > avail) scroll.scrollLeft = Math.max(0, idx * slot - avail / 2);
+}
+
+function selectDay(i) {
+  if (!CH) return;
+  CH.sel = i;
+  state.sel = CH.cal[i];
+  CH.band.setAttribute('x', i * CH.slot);
+  var date = CH.cal[i], metric = state.metric;
+  var d = CH.dmap.get(date) || { cost: 0, all: 0, out: 0, by: new Map() };
+  var head = h('div', { class: 'ro-head' }, h('strong', { text: fmtDay(date) }), i === CH.peak ? h('span', { class: 'tag', text: 'Peak day' }) : null);
+  var sums = h('div', { class: 'ro-sums' },
+    h('span', { class: metric === 'cost' ? 'on' : '' }, 'Cost ', h('b', { text: fmtCost(d.cost) })),
+    h('span', { class: metric === 'all' ? 'on' : '' }, 'All tokens ', h('b', { text: fmtInt(d.all) })),
+    h('span', { class: metric === 'out' ? 'on' : '' }, 'Output ', h('b', { text: fmtInt(d.out) })));
+  var items = CH.keys.map(function (key) { return { k: key, v: d.by.has(key) ? d.by.get(key)[metric] : 0 }; })
+    .filter(function (o) { return o.v > 0; }).sort(function (a, b) { return b.v - a.v; });
+  var total = d[metric];
+  var list = h('ul', { class: 'ro-rows' }, items.length ? items.map(function (o) {
+    return h('li', null, swatch(o.k === OTHER ? 'var(--sx)' : colorOf(o.k)), h('span', { text: o.k === OTHER ? 'Other models' : prettyModel(o.k) }),
+      h('span', { class: 'v', text: fmtVal(o.v, metric, false) }), h('span', { class: 'p', text: total > 0 ? fmtPct(o.v / total * 100) : '' }));
+  }) : h('li', null, h('span'), h('span', { text: 'No usage on this day.' })));
+  var ro = $('readout');
+  ro.replaceChildren(h('div', null, head, sums), list);
+}
+
+/* ---------- PC x model matrix ---------- */
+function renderMatrix() {
+  var head = $('matrixhead'), body = $('matrixbody'), metric = state.metric;
+  if (!PCS.length) {
+    head.replaceChildren(); body.replaceChildren(h('tr', null, h('td', { class: 'empty', text: 'No PCs on this page. Add one below.' })));
+    return;
+  }
+  var models = Array.from(sumBy(rowsOf(PCS), function (r) { return r[1]; }).keys()).sort(function (a, b) { return rankOf(a) - rankOf(b); });
+  var hr = h('tr', null, h('th', { scope: 'col', text: 'PC / IP' }));
+  models.forEach(function (m) { hr.appendChild(h('th', { scope: 'col' }, h('span', { class: 'mname', title: m }, swatch(colorOf(m)), prettyModel(m)))); });
+  hr.appendChild(h('th', { scope: 'col', text: 'Total' }));
+  head.replaceChildren(hr);
+  var colTot = {}, grand = 0;
+  var trs = PCS.map(function (p) {
+    var by = sumBy(p.rows, function (r) { return r[1]; }), rowTot = 0;
+    var tr = h('tr', { class: state.pc === p.label ? 'cur' : '' }, h('th', { scope: 'row', class: p.system ? 'rowh hassys' : 'rowh' }, h('span', { text: p.label }), p.system ? h('span', { class: 'pcsys', text: p.system }) : null));
+    models.forEach(function (m) {
+      var v = by.has(m) ? by.get(m)[metric] : 0;
+      rowTot += v; colTot[m] = (colTot[m] || 0) + v;
+      tr.appendChild(h('td', { class: 'num', text: v > 0 ? fmtVal(v, metric, true) : '–', title: v > 0 ? fmtVal(v, metric, false) : null }));
+    });
+    grand += rowTot;
+    tr.appendChild(h('td', { class: 'num', text: rowTot > 0 ? fmtVal(rowTot, metric, true) : '–', title: fmtVal(rowTot, metric, false) }));
+    return tr;
+  });
+  var tot = h('tr', { class: 'tot' }, h('th', { scope: 'row', text: 'Total' }));
+  models.forEach(function (m) { tot.appendChild(h('td', { class: 'num', text: colTot[m] > 0 ? fmtVal(colTot[m], metric, true) : '–', title: fmtVal(colTot[m], metric, false) })); });
+  tot.appendChild(h('td', { class: 'num', text: fmtVal(grand, metric, true), title: fmtVal(grand, metric, false) }));
+  trs.push(tot);
+  body.replaceChildren.apply(body, trs);
+}
+
+/* ---------- sessions ---------- */
+function renderSessions() {
+  var present = new Set(PCS.map(function (p) { return p.label; }));
+  var list = SEED.sessions.concat(live.sessions).filter(function (x) { return present.has(x.pc); }).sort(function (a, b) { return b.cost - a.cost; }).slice(0, 10);
+  var body = $('sessbody');
+  $('sess-meta').textContent = list.length ? 'Top ' + list.length + ' by cost' : '';
+  if (!list.length) { body.replaceChildren(h('tr', null, h('td', { class: 'empty', colspan: 7, text: 'No session rows on this page.' }))); return; }
+  var trs = list.map(function (x) {
+    var last = x.last ? x.last.replace('T', ' ').slice(0, 16) + ' UTC' : '–';
+    return h('tr', null,
+      h('td', { class: 'num', title: x.id, text: x.id.length > 10 ? x.id.slice(0, 8) + '…' : x.id }),
+      h('td', { text: x.pc, style: 'text-align:left' }),
+      h('td', { class: 'num', text: last, style: 'text-align:left' }),
+      h('td', { style: 'text-align:left' }, x.models.map(function (m) { return h('span', { class: 'mname', style: 'margin-right:10px', title: m }, swatch(colorOf(m)), prettyModel(m)); })),
+      h('td', { class: 'num', text: fmtInt(x.out) }), h('td', { class: 'num', text: fmtInt(x.all) }), h('td', { class: 'num', text: fmtCost(x.cost) }));
+  });
+  body.replaceChildren.apply(body, trs);
+}
+
+/* ---------- PC list ---------- */
+function renderPCs() {
+  var ul = $('pclist');
+  $('savenote').hidden = storageOK || mode !== 'local';
+  if (!PCS.length) { ul.replaceChildren(h('li', null, h('span', { class: 'who' }, 'No PCs on this page.'))); return; }
+  var active = document.activeElement, keepFocus = active && active.getAttribute && active.closest && active.closest('#pclist') ? active.getAttribute('data-pc') : null;
+  var items = PCS.map(function (p) {
+    var ds = p.rows.map(function (r) { return r[0]; }).sort(), t = sumAll(p.rows);
+    var nd = new Set(ds).size;
+    var meta = p.rows.length ? nd + (nd === 1 ? ' day, ' : ' days, ') + (ds[0] === ds[ds.length - 1] ? fmtDate(ds[0]) : fmtDate(ds[0]) + ' to ' + fmtDate(ds[ds.length - 1])) + ', ' + fmtCost(t.cost) : 'No rows';
+    return h('li', null,
+      h('div', { class: 'who' }, h('b', { text: p.label }), p.system ? h('div', { class: 'sys', text: p.system }) : null, h('span', { text: meta })),
+      p.live ? h('span', { class: 'livetag', text: 'Live', title: 'Sent by this PC\u2019s Claude Code through the collector' })
+      : h('button', { type: 'button', class: 'btn ghost sm', 'data-pc': p.label, text: mode === 'shared' && removeArmed === p.label ? 'Click again to remove' : 'Remove', disabled: !editable(),
+        'aria-label': (mode === 'shared' && removeArmed === p.label ? 'Confirm removing ' : 'Remove ') + p.label, onclick: function () { removeClick(p.label); } }));
+  });
+  ul.replaceChildren.apply(ul, items);
+  if (keepFocus) {
+    var again = Array.prototype.filter.call(ul.querySelectorAll('button'), function (b) { return b.getAttribute('data-pc') === keepFocus; })[0];
+    if (again) again.focus();
+  }
+}
+var removeArmed = '', removeArmedAt = 0, removeTimer = 0;
+function removeClick(label) {
+  if (mode !== 'shared') { removePC(label); return; }
+  if (removeArmed !== label) {
+    removeArmed = label; removeArmedAt = Date.now();
+    clearTimeout(removeTimer); removeTimer = setTimeout(function () { removeArmed = ''; renderPCs(); }, 4000);
+    renderPCs();
+    return;
+  }
+  if (Date.now() - removeArmedAt < 600) return; /* a double click is not a confirmation */
+  clearTimeout(removeTimer); removeArmed = '';
+  removePC(label);
+}
+function removePC(label) {
+  if (mode === 'connecting') { setMsg('err', 'Still connecting to the shared store. Try again in a moment.'); return; }
+  if (!canWriteNow()) { setMsg('err', 'You have view-only access to this artifact, so you cannot remove PCs.'); return; }
+  disarmReset();
+  if (mode === 'shared') {
+    setStatus('Removing \u201C' + label + '\u201D from the shared store\u2026');
+    removeSharedPC(label).then(function () { state.sel = null; setMsg('ok', 'Removed \u201C' + label + '\u201D.'); },
+      function (e) { latchIfRefused(e); setMsg('err', 'Could not remove \u201C' + label + '\u201D. ' + dbErr(e) + ' It may be partly removed. Click Remove again to finish.'); });
+    return;
+  }
+  var low = label.toLowerCase();
+  PCS = PCS.filter(function (p) { return p.label.toLowerCase() !== low; });
+  if (SEED.pcs.some(function (s) { return s.label.toLowerCase() === low; }) && removedSeeds.indexOf(low) < 0) removedSeeds.push(low);
+  saveState();
+  state.sel = null;
+  renderAll();
+  setMsg('ok', 'Removed \u201C' + label + '\u201D.', storageOK ? null : ['This browser is blocking storage, so the PC may come back when you reload the page.']);
+}
+
+/* ---------- reading files ---------- */
+function decodeBytes(u8) {
+  var enc = 'utf-8';
+  if (u8[0] === 0xFF && u8[1] === 0xFE) enc = 'utf-16le';
+  else if (u8[0] === 0xFE && u8[1] === 0xFF) enc = 'utf-16be';
+  else if (u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) enc = 'utf-8';
+  else if (u8.length >= 4 && u8[0] !== 0 && u8[1] === 0 && u8[2] !== 0 && u8[3] === 0) enc = 'utf-16le';
+  else if (u8.length >= 4 && u8[0] === 0 && u8[1] !== 0 && u8[2] === 0 && u8[3] !== 0) enc = 'utf-16be';
+  if (enc === 'utf-16be') {
+    var sw = new Uint8Array(u8.length - (u8.length % 2));
+    for (var i = 0; i < sw.length; i += 2) { sw[i] = u8[i + 1]; sw[i + 1] = u8[i]; }
+    u8 = sw; enc = 'utf-16le';
+  }
+  var text = new TextDecoder(enc).decode(u8).replace(/^﻿/, '');
+  var at = text.search(/[\[{]/);
+  return at > 0 ? text.slice(at) : text;
+}
+function readJSON(file) {
+  return file.arrayBuffer().then(function (buf) { return JSON.parse(decodeBytes(new Uint8Array(buf))); });
+}
+function normDate(v) {
+  if (v == null) return null;
+  var str = String(v), m = /^(\d{4})-(\d{2})-(\d{2})/.exec(str), s;
+  if (m) s = m[1] + '-' + m[2] + '-' + m[3];
+  else { var d = new Date(str); if (isNaN(d)) return null; s = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+  return validDate(s) ? s : null;
+}
+function num(x) { x = Number(x); return isFinite(x) ? x : 0; }
+/* Accepts both ccusage layouts: { daily: [{ date | period, modelBreakdowns }] } */
+function extractRows(json) {
+  var src = json && !Array.isArray(json) && json.usage && typeof json.usage === 'object' && !json.daily ? json.usage : json;
+  var days = Array.isArray(src) ? src : (src && (src.daily || src.days)) || [];
+  var hasList = Array.isArray(src) || !!(src && (Array.isArray(src.daily) || Array.isArray(src.days)));
+  var out = [], ignored = 0, noBreak = 0, badDate = 0, badNum = 0, entries = 0, emptyDays = 0, seen = new Map();
+  days.forEach(function (d) {
+    var date = normDate(d.date || d.period);
+    if (!date) { badDate++; return; }
+    var bds = Array.isArray(d.modelBreakdowns) ? d.modelBreakdowns : null;
+    if (!bds) {
+      var mu = d.modelsUsed || [];
+      if (mu.length === 1) bds = [{ modelName: mu[0], inputTokens: d.inputTokens, outputTokens: d.outputTokens, cacheCreationTokens: d.cacheCreationTokens, cacheReadTokens: d.cacheReadTokens, cost: d.totalCost }];
+      else { noBreak++; return; }
+    }
+    if (!bds.length) emptyDays++;
+    bds.forEach(function (b) {
+      var m = clean(b && (b.modelName || b.model), 120);
+      entries++;
+      seen.set(m || '(no name)', (seen.get(m || '(no name)') || 0) + 1);
+      /* a provider prefix (anthropic.claude-..., us.anthropic.claude-..., anthropic/claude-...) and a version suffix (-v1:0) do not make it a different model */
+      var k = /(?:^|[\/.:])(claude-\S+)$/i.exec(m);
+      if (k) m = k[1].toLowerCase().replace(/-v\d+(?::\d+)?$/, '');
+      if (m.indexOf('claude-') !== 0) { ignored++; return; }
+      var row = [date, m, num(b.inputTokens), num(b.outputTokens), num(b.cacheCreationTokens), num(b.cacheReadTokens), num(b.cost != null ? b.cost : b.totalCost)];
+      if (!row.slice(2).every(validNum)) { badNum++; return; }
+      out.push(row);
+    });
+  });
+  return { rows: out, ignored: ignored, noBreak: noBreak, badDate: badDate, badNum: badNum, found: days.length, hasList: hasList, entries: entries, emptyDays: emptyDays, seen: Array.from(seen.keys()).slice(0, 8), seenMore: Math.max(0, seen.size - 8) };
+}
+
+function whatWasInside(r) {
+  var days = r.found + (r.found === 1 ? ' day' : ' days');
+  if (!r.entries) return 'It lists ' + days + ' but no per-model entries' + (r.emptyDays ? ' (' + r.emptyDays + ' of them have an empty breakdown)' : '') + '. ccusage may not have found any Claude Code logs on that PC.';
+  return 'It has ' + days + ' and ' + r.entries + ' model entries, but none are Claude models. Model names in the file: ' + r.seen.join(', ') + (r.seenMore ? ' and ' + r.seenMore + ' more' : '') + '. Only names containing \u201Cclaude-\u201D are kept.';
+}
+
+function setMsg(kind, text, details) {
+  var box = $('addmsg');
+  box.className = 'msg ' + kind;
+  box.replaceChildren(text ? (kind === 'ok' ? 'Done. ' : 'Problem. ') + text : '');
+  if (details && details.length) box.appendChild(h('ul', null, details.map(function (x) { return h('li', { text: x }); })));
+}
+
+function setStatus(text) { var box = $('addmsg'); box.className = 'msg'; box.replaceChildren(text); }
+
+/* ---------- shared store (the artifact's db capability) ----------
+   When this view can run db, PCs live in the artifact's database so every device on this account sees the same ones:
+     pcs/<id>         {label, system, onto, months:[YYYY-MM, ...]}                      one per PC (id made from the label)
+     rows/<id>__<m>   {pc, month, rows:[[date, model, in, out, cache write, cache read, cost], ...]}   one per PC and month, so each document stays small
+     meta/settings    {removedSeeds:[...], colors:[model ids in colour order]}
+   Without db the page keeps working with browser-only storage. */
+function fnv(s) { var x = 0x811c9dc5; for (var i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 0x01000193) >>> 0; } return x.toString(36); }
+function pcId(label) {
+  var low = label.toLowerCase();
+  return (low.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'pc') + '~' + fnv(low);
+}
+function rowsByMonth(rows) {
+  var m = new Map();
+  rows.forEach(function (r) { var k = r[0].slice(0, 7); if (!m.has(k)) m.set(k, []); m.get(k).push(r); });
+  m.forEach(function (list) { list.sort(function (a, b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0; }); });
+  return m;
+}
+function mapDocs(snap) { var m = new Map(); snap.docs.forEach(function (d) { var v = d.data(); if (v) m.set(d.id, v); }); return m; }
+function sameList(a, b) { return a.length === b.length && a.every(function (x, i) { return x === b[i]; }); }
+function dbErr(e) {
+  var c = e && e.code;
+  if (c === 'quota_exceeded') return 'The shared store is full. Remove a PC you no longer need and try again.';
+  if (c === 'invalid_argument') return 'This view is not allowed to change the shared store.';
+  if (c === 'resource_exhausted') return 'Too many requests at once. Wait a moment and try again.';
+  if (c === 'revoked' || c === 'not_granted') return 'Access to the shared store was withdrawn.';
+  return 'The shared store did not answer' + (c ? ' (' + c + ')' : '') + '. Try again.';
+}
+function strList(a, prefix) { return Array.isArray(a) ? a.filter(function (x) { return typeof x === 'string' && x.indexOf(prefix) === 0; }) : []; }
+function savedFromShared() {
+  /* a PC's rows are every rows/ document whose `pc` field is its id: nothing stored can go stale or list a month that is missing */
+  var byPc = new Map();
+  shared.rows.forEach(function (d) {
+    if (!d || typeof d.pc !== 'string' || !validRows(d.rows)) return;
+    var l = byPc.get(d.pc); if (!l) byPc.set(d.pc, l = []);
+    l.push(d.rows);
+  });
+  var out = [];
+  shared.pcs.forEach(function (d, id) {
+    if (!d || typeof d.label !== 'string' || !d.label) return;
+    out.push({ label: d.label, rows: [].concat.apply([], byPc.get(id) || []), seed: false, onto: d.onto === true, system: typeof d.system === 'string' ? d.system : '' });
+  });
+  var meta = shared.meta || {};
+  return { pcs: out, removedSeeds: strList(meta.removedSeeds, ''), colors: strList(meta.colors, 'claude-') };
+}
+/* one retry after a short random pause when the platform reports a transient 'unavailable' (db.d.ts) */
+function withRetry(fn) {
+  return fn().catch(function (e) {
+    if (e && e.code === 'unavailable') return new Promise(function (r) { setTimeout(r, 300 + Math.random() * 500); }).then(fn);
+    throw e;
+  });
+}
+/* read the settings document fresh, let fn decide what to change from that fresh copy, write only those fields.
+   One change at a time from this device: two read-then-write pairs side by side would each see no document and the
+   second set() would wipe the first (the collector address and the colour order are written moments apart). */
+var metaChain = Promise.resolve();
+function mutateMeta(fn) {
+  var run = metaChain.then(function () { return mutateMetaNow(fn); });
+  metaChain = run.then(function () {}, function () {});
+  return run;
+}
+function mutateMetaNow(fn) {
+  return withRetry(function () { return DB.doc('meta/settings').get(); }).then(function (snap) {
+    var cur = snap.exists ? snap.data() : null, patch = fn(cur || {});
+    if (!patch) return;
+    return withRetry(function () { return cur ? DB.doc('meta/settings').update(patch) : DB.doc('meta/settings').set(patch); })
+      .catch(function (e) { if (cur && e && e.code === 'invalid_argument') return DB.doc('meta/settings').set(patch); throw e; });
+  });
+}
+function addRemovedSeed(low) {
+  return mutateMeta(function (cur) { var l = strList(cur.removedSeeds, ''); return l.indexOf(low) >= 0 ? null : { removedSeeds: l.concat(low) }; });
+}
+/* Merge only the rows from this upload into each month document, read fresh just before writing, so a stale snapshot
+   can never wipe another device's rows. The PC document goes last: a PC only appears once its rows exist. */
+function writeIncomingShared(label, incoming, info) {
+  var id = pcId(label), groups = rowsByMonth(incoming), chain = Promise.resolve();
+  groups.forEach(function (rows, m) {
+    var path = 'rows/' + id + '__' + m;
+    chain = chain.then(function () {
+      return withRetry(function () { return DB.doc(path).get(); }).then(function (snap) {
+        var d = snap.exists ? snap.data() : null, base = d && validRows(d.rows) ? d.rows : [];
+        var merged = rowsByMonth(mergeRows(base, rows)).get(m);
+        if (snap.exists && JSON.stringify(merged) === JSON.stringify(base)) return; /* nothing new in this month */
+        return withRetry(function () { return DB.doc(path).set({ pc: id, month: m, rows: merged }); });
+      });
+    });
+  });
+  return chain.then(function () { return withRetry(function () { return DB.doc('pcs/' + id).get(); }); }).then(function (snap) {
+    var prev = snap.exists ? snap.data() : null;
+    var body = {
+      label: prev && typeof prev.label === 'string' && prev.label ? prev.label : label,
+      system: info.system || (prev && typeof prev.system === 'string' ? prev.system : ''),
+      onto: prev ? prev.onto === true : !!info.onto
+    };
+    return withRetry(function () { return DB.doc('pcs/' + id).set(body); });
+  });
+}
+/* Remove: rows first, the PC document last, so an interrupted remove leaves the PC visible to finish later (never hidden debris) */
+function removeSharedPC(label) {
+  var id = pcId(label), low = label.toLowerCase(), paths = [];
+  shared.rows.forEach(function (d, key) { if (d && d.pc === id) paths.push('rows/' + key); });
+  var chain = withRetry(function () { return DB.collection('rows').where('pc', '==', id).get(); }).then(function (snap) {
+    snap.docs.forEach(function (d) { var pth = 'rows/' + d.id; if (paths.indexOf(pth) < 0) paths.push(pth); });
+  }, function () { /* the snapshot list is enough */ });
+  chain = chain.then(function () { return runPool(paths.map(function (pth) { return function () { return withRetry(function () { return DB.doc(pth).delete(); }); }; }), 4); });
+  chain = chain.then(function () { return withRetry(function () { return DB.doc('pcs/' + id).delete(); }); });
+  if (SEED.pcs.some(function (s) { return s.label.toLowerCase() === low; })) chain = chain.then(function () { return addRemovedSeed(low); });
+  return chain;
+}
+function runPool(tasks, n) {
+  var i = 0, firstErr = null;
+  function next() {
+    if (i >= tasks.length || firstErr) return Promise.resolve();
+    return tasks[i++]().then(next, function (e) { firstErr = firstErr || e; });
+  }
+  var workers = [];
+  for (var k = 0; k < Math.min(n, tasks.length); k++) workers.push(next());
+  return Promise.all(workers).then(function () { if (firstErr) throw firstErr; });
+}
+function resetSharedStore() {
+  var rowP = [], pcP = [];
+  shared.rows.forEach(function (_, id) { rowP.push('rows/' + id); });
+  shared.pcs.forEach(function (_, id) { pcP.push('pcs/' + id); });
+  var del = function (path) { return function () { return withRetry(function () { return DB.doc(path).delete(); }); }; };
+  return runPool(rowP.map(del), 4).then(function () { return runPool(pcP.map(del), 4); }).then(function () {
+    /* the settings document goes too, except the collector address, which is not an added PC */
+    return withRetry(function () { return DB.doc('meta/settings').get(); }).then(function (snap) {
+      var cur = snap.exists ? snap.data() : null, keep = cur && validLiveCfg(cur.live) ? { live: normLiveCfg(cur.live) } : null;
+      return withRetry(function () { return keep ? DB.doc('meta/settings').set(keep) : DB.doc('meta/settings').delete(); });
+    });
+  });
+}
+var applyTimer = 0;
+function scheduleApply() { if (applyTimer) return; applyTimer = setTimeout(function () { applyTimer = 0; applyShared(); }, 0); }
+function applyShared() {
+  if (mode !== 'shared' || !shared.pcs || !shared.rows || !shared.meta) return;
+  var saved = savedFromShared();
+  var cfgMeta = shared.meta && validLiveCfg(shared.meta.live) ? normLiveCfg(shared.meta.live) : null;
+  if (!cfgMeta && canWrite && !live.migrated) {
+    /* a collector connected while this browser was offline-only moves to the shared store, once */
+    var loc = readLiveLocal();
+    if (loc) { live.migrated = true; saveLiveCfg(loc).then(function () { try { localStorage.removeItem(LIVE_KEY); } catch (e) {} }, function () {}); cfgMeta = loc; }
+  }
+  setLiveCfg(cfgMeta);
+  removedSeeds = saved.removedSeeds;
+  PCS = buildPCs(saved);
+  reg.clear(); restoreColors(saved); register();
+  /* new models get the next colour slot. The stored order is only ever appended to (never rebuilt from what is on screen),
+     so a partial first snapshot cannot shrink it, and every device agrees on the colours */
+  var fresh = Array.from(reg.keys()).filter(function (m) { return saved.colors.indexOf(m) < 0; });
+  if (canWrite && !colorWrite && fresh.length) {
+    colorWrite = true;
+    mutateMeta(function (cur) {
+      var stored = strList(cur.colors, 'claude-'), add = fresh.filter(function (m) { return stored.indexOf(m) < 0; });
+      return add.length ? { colors: stored.concat(add) } : null;
+    }).then(function () { colorWrite = false; }, function () { colorWrite = false; });
+  }
+  renderAll();
+  renderMigrate();
+}
+function sharedStep() {
+  if (!shared.pcs || !shared.rows || !shared.meta) return;
+  if (mode === 'connecting') { mode = 'shared'; renderModeNote(); }
+  scheduleApply();
+}
+function fallbackToLocal(note) {
+  if (mode === 'local') return;
+  unsubs.forEach(function (u) { try { u(); } catch (e) {} });
+  unsubs = []; mode = 'local'; fallbackNote = note || ''; shared = { pcs: null, rows: null, meta: null }; DB = null;
+  setLiveCfg(readLiveLocal());
+  var saved = applySaved();
+  reg.clear(); restoreColors(saved); register();
+  renderAll(); renderModeNote(); renderMigrate();
+}
+function connectShared() {
+  if (!(window.claude && typeof window.claude.use === 'function')) { fallbackNote = 'Shared storage is not available in this view.'; renderModeNote(); return; }
+  mode = 'connecting'; renderModeNote();
+  Promise.all([window.claude.use('db'), window.claude.use('user')]).then(function (r) {
+    var db = r[0], user = r[1];
+    if (!db) { fallbackToLocal('Shared storage is not available in this view.'); return; }
+    return Promise.resolve(user && typeof user.can === 'function' ? user.can('data.write') : null).then(function (can) {
+      if (mode !== 'connecting') return;
+      DB = db; canWrite = can !== false;
+      var fail = function (e) { fallbackToLocal('The shared store stopped responding' + (e && e.code ? ' (' + e.code + ')' : '') + ', so this page is showing the PCs saved in this browser.'); };
+      unsubs.push(DB.collection('pcs').onSnapshot(function (s) { shared.pcs = mapDocs(s); sharedStep(); }, fail));
+      unsubs.push(DB.collection('rows').onSnapshot(function (s) { shared.rows = mapDocs(s); sharedStep(); }, fail));
+      unsubs.push(DB.doc('meta/settings').onSnapshot(function (s) { shared.meta = s.exists ? (s.data() || {}) : {}; sharedStep(); }, fail));
+    });
+  }).catch(function () { fallbackToLocal('Shared storage is not available in this view.'); });
+}
+function resetLabel() { return mode === 'shared' ? 'Remove every added PC (all devices)' : 'Reset to the built-in data'; }
+function renderModeNote() {
+  var txt;
+  if (mode === 'connecting') txt = 'Connecting to the shared store…';
+  else if (mode === 'shared') txt = canWrite
+    ? 'Shared store: the PCs you add are saved in this artifact’s private database, so every device signed in to this account sees the same PCs. Anyone you share this artifact with can see them too.'
+    : 'Shared store, view only: you can see the saved PCs but not change them. Ask the owner of this artifact to add or remove PCs.';
+  else txt = 'PCs you add are kept in this browser only, so they are still here when you reopen the page on this device. They are not shared with other devices or people.' + (fallbackNote ? ' ' + fallbackNote : '');
+  $('storemode').textContent = txt;
+  var on = editable();
+  Array.prototype.forEach.call($('addform').elements, function (el) { el.disabled = !on; });
+  $('resetbtn').disabled = !on;
+  if (!resetTimer) $('resetbtn').textContent = resetLabel();
+  renderSelect(); renderHeader(); renderPCs(); renderLiveNote();
+}
+function localTodo() {
+  var local = mode === 'shared' && canWrite ? readStore() : null;
+  if (!local || !shared.pcs) return null;
+  var list = [];
+  local.pcs.forEach(function (p) {
+    var id = pcId(p.label), existing = shared.pcs.has(id), have = new Set();
+    if (existing) shared.rows.forEach(function (d) { if (d && d.pc === id && validRows(d.rows)) d.rows.forEach(function (r) { have.add(r[0] + '|' + r[1]); }); });
+    var missing = existing ? p.rows.filter(function (r) { return !have.has(r[0] + '|' + r[1]); }) : p.rows;
+    if (!existing || missing.length) list.push({ p: p, incoming: missing, isNew: !existing });
+  });
+  var seeds = local.removedSeeds.filter(function (low) { return SEED.pcs.some(function (s) { return s.label.toLowerCase() === low; }) && strList((shared.meta || {}).removedSeeds, '').indexOf(low) < 0; });
+  return { list: list, seeds: seeds };
+}
+var migrating = false;
+function renderMigrate() {
+  var box = $('migrate'), todo = localTodo();
+  if (!todo || !todo.list.length) { box.hidden = true; box.textContent = ''; return; }
+  var n = todo.list.length;
+  box.hidden = false;
+  box.replaceChildren('This browser has ' + n + (n === 1 ? ' saved PC' : ' saved PCs') + ' with data the shared store does not have yet: ' +
+    todo.list.map(function (x) { return x.p.label + (x.isNew ? '' : ' (extra days only)'); }).join(', ') + '. ',
+    h('button', { type: 'button', class: 'btn ghost sm', text: 'Move to the shared store', disabled: migrating, onclick: migrateLocal }));
+}
+function migrateLocal() {
+  var todo = localTodo();
+  if (!todo || migrating) return;
+  migrating = true; renderMigrate();
+  var chain = Promise.resolve(), moved = 0, merged = 0;
+  setStatus('Moving ' + todo.list.length + (todo.list.length === 1 ? ' PC' : ' PCs') + ' to the shared store\u2026');
+  todo.list.forEach(function (x) {
+    chain = chain.then(function () { return writeIncomingShared(x.p.label, x.incoming, { system: x.p.system, onto: x.p.onto }); }).then(function () { if (x.isNew) moved++; else merged++; });
+  });
+  todo.seeds.forEach(function (low) { chain = chain.then(function () { return addRemovedSeed(low); }); });
+  chain.then(function () {
+    try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+    setMsg('ok', 'Moved ' + moved + (moved === 1 ? ' PC' : ' PCs') + ' to the shared store' + (merged ? ' and added the missing days to ' + merged + (merged === 1 ? ' PC' : ' PCs') + ' that ' + (merged === 1 ? 'was' : 'were') + ' already there' : '') + '.');
+  }, function (e) { latchIfRefused(e); setMsg('err', 'Could not move the saved PCs. ' + dbErr(e) + ' What was already moved is safe, and the rest is still in this browser. Click Move again to finish.'); })
+    .then(function () { migrating = false; renderMigrate(); });
+}
+/* db.d.ts: when the platform did not say whether this viewer may write and a well-formed write is refused, stay read-only for the visit */
+function latchIfRefused(e) {
+  if (e && e.code === 'invalid_argument' && mode === 'shared' && canWrite) { canWrite = false; renderModeNote(); }
+}
+
+function commit(pc, incoming, sys) {
+  if (mode === 'shared') return writeIncomingShared(pc.label, incoming, { system: sys, onto: !!pc.own });
+  var i = indexByLabel(PCS, pc.label);
+  if (i >= 0) PCS[i] = pc; else PCS.push(pc);
+  saveState();
+  return Promise.resolve();
+}
+
+function collectorInfo(j) {
+  var pc = j && !Array.isArray(j) && j.pc && typeof j.pc === 'object' ? j.pc : null;
+  if (!pc) return null;
+  var name = clean(pc.name, 60);
+  return name ? { name: name, ip: clean(pc.ip, 45), system: clean(pc.system, 160) } : null;
+}
+function infoLabel(i) { return i.name + ' \u00B7 ' + (i.ip || 'unknown IP'); }
+
+/* Merge the rows of one PC's files into that PC and save it; resolves with a summary of what changed. */
+/* the same computer name under more than one IP is probably one PC counted twice: one note per name, naming the PCs */
+function twinNotes(results) {
+  var labels = PCS.map(function (p) { return p.label; }), lows = labels.map(function (l) { return l.toLowerCase(); });
+  results.forEach(function (r) { if (lows.indexOf(r.label.toLowerCase()) < 0) { labels.push(r.label); lows.push(r.label.toLowerCase()); } });
+  var byName = new Map(), fresh = results.filter(function (r) { return !r.existed; }).map(function (r) { return r.label.toLowerCase(); }), out = [];
+  labels.forEach(function (l) { var b = l.split(' \u00B7 ')[0].toLowerCase(); if (!byName.has(b)) byName.set(b, []); byName.get(b).push(l); });
+  byName.forEach(function (list) {
+    var isFresh = function (l) { return fresh.indexOf(l.toLowerCase()) >= 0; };
+    if (list.length < 2 || !list.some(isFresh)) return;
+    if (list.length === 2) {
+      var newer = list.filter(isFresh).pop(), other = list.filter(function (l) { return l !== newer; })[0];
+      out.push('A PC with the same name is already on this page as \u201C' + other + '\u201D. If this is the same PC and only its IP address changed, remove one of the two. Otherwise its usage is counted twice.');
+    } else out.push('Several PCs share the name \u201C' + list[0].split(' \u00B7 ')[0] + '\u201D: ' + list.join(', ') + '. If they are the same PC and only its IP address changed, keep one and remove the rest. Otherwise its usage is counted twice.');
+  });
+  return out;
+}
+
+function addGroup(g, notes, batch) {
+  var label = g.label, sys = g.sys, good = g.files, ignored = 0;
+  good.forEach(function (x) { ignored += x.r.ignored; });
+  var cur = PCS[indexByLabel(PCS, label)];
+  var existed = !!cur, onto = existed && (cur.seed || !!cur.own);
+  var pc = existed
+    ? { label: cur.label, rows: cur.rows.slice(), seed: false, system: cur.system, own: cur.own ? cur.own.slice() : undefined, sysTyped: cur.sysTyped }
+    : { label: label, rows: [], seed: false, system: '' };
+  var map = new Map(), own = new Map(), incomingAll = new Map(), replaced = 0, added = 0;
+  pc.rows.forEach(function (r) { map.set(r[0] + '|' + r[1], r); });
+  if (onto) (pc.own || []).forEach(function (r) { own.set(r[0] + '|' + r[1], r); });
+  good.forEach(function (x) {
+    var inFile = new Map();
+    x.r.rows.forEach(function (r) {
+      var k = r[0] + '|' + r[1], a = inFile.get(k);
+      if (!a) inFile.set(k, r.slice());
+      else for (var c = 2; c < 7; c++) a[c] += r[c];
+    });
+    inFile.forEach(function (r, k) { if (map.has(k)) replaced++; else added++; map.set(k, r); incomingAll.set(k, r); if (onto) own.set(k, r); });
+  });
+  pc.rows = Array.from(map.values());
+  if (onto) pc.own = Array.from(own.values());
+  if (sys) { pc.system = sys; if (onto) pc.sysTyped = sys; }
+  return commit(pc, Array.from(incomingAll.values()), sys).then(function () {
+    return { label: pc.label, existed: existed, added: added, replaced: replaced, ignored: ignored, files: good.length };
+  }, function (e) { var w = new Error('save failed'); w.cause = e; w.label = pc.label; throw w; });
+}
+
+var bulkReady = false;
+function addPC(ev) {
+  ev.preventDefault();
+  var nameEl = $('pcname'), ipEl = $('pcip'), filesEl = $('pcfiles'), sysEl = $('pcsys');
+  var name = nameEl.value.replace(/\s+/g, ' ').trim(), ip = ipEl.value.replace(/\s+/g, ' ').trim(), files = Array.prototype.slice.call(filesEl.files);
+  if (mode === 'connecting') { setMsg('err', 'Still connecting to the shared store. Try again in a moment.'); return; }
+  if (!canWriteNow()) { setMsg('err', 'You have view-only access to this artifact, so you cannot add PCs.'); return; }
+  /* several files that each name their own PC: every file becomes its own PC and the fields above are not needed */
+  var bulk = bulkReady && files.length >= 2;
+  [nameEl, ipEl, filesEl].forEach(function (e) { e.removeAttribute('aria-invalid'); });
+  var problems = [], focusEl = null;
+  if (!bulk && !name) { problems.push('Type a PC name.'); nameEl.setAttribute('aria-invalid', 'true'); focusEl = focusEl || nameEl; }
+  if (!bulk && !ip) { problems.push('Type an IP address. It is only a label, so any address you use for this PC will do.'); ipEl.setAttribute('aria-invalid', 'true'); focusEl = focusEl || ipEl; }
+  if (!files.length) { problems.push('Choose at least one usage file.'); filesEl.setAttribute('aria-invalid', 'true'); focusEl = focusEl || filesEl; }
+  if (problems.length) { setMsg('err', problems.join(' ')); focusEl.focus(); return; }
+  var label = name + ' \u00B7 ' + ip, sys = sysEl.value.replace(/\s+/g, ' ').trim();
+  $('addbtn').disabled = true;
+  Promise.all(files.map(function (f) {
+    return readJSON(f).then(function (j) { return { f: f, r: extractRows(j), info: collectorInfo(j) }; }, function (e) { return { f: f, err: e && e.message ? e.message : 'could not be read' }; });
+  })).then(function (res) {
+    var notes = [], good = [];
+    res.forEach(function (x) {
+      if (x.err) { notes.push(x.f.name + ': not valid JSON (' + x.err + ').'); return; }
+      if (x.r.noBreak && !x.r.rows.length) { notes.push(x.f.name + ': no per-model data. Run the command above with --breakdown.'); return; }
+      var badNote = x.r.badDate ? x.r.badDate + (x.r.badDate === 1 ? ' day was' : ' days were') + ' skipped because the date is missing, not a real date, or outside ' + MIN_DATE.slice(0, 4) + ' to ' + MAX_DATE.slice(0, 4) + '.' : '';
+      var numNote = x.r.badNum ? x.r.badNum + (x.r.badNum === 1 ? ' row was' : ' rows were') + ' skipped because a token or cost value was negative or implausibly large.' : '';
+      if (!x.r.rows.length) { notes.push(x.f.name + ': ' + (x.r.found ? 'no usable Claude rows in this file. ' + whatWasInside(x.r) : (x.r.hasList ? 'the file is fine, but it contains no days: ccusage found no usage on that PC. It looks in the Windows user\u2019s .claude folder (or CLAUDE_CONFIG_DIR if set). Claude Code used inside WSL or by another Windows user is not seen.' : 'no "daily" list found. Is this the output of the command above?')) + (badNote ? ' ' + badNote : '') + (numNote ? ' ' + numNote : '')); return; }
+      if (badNote) notes.push(x.f.name + ': ' + badNote);
+      if (numNote) notes.push(x.f.name + ': ' + numNote);
+      if (x.r.noBreak) notes.push(x.f.name + ': ' + x.r.noBreak + ' days skipped because they had no per-model breakdown.');
+      good.push(x);
+    });
+    var groups = [];
+    if (bulk) {
+      good.forEach(function (x) {
+        if (!x.info) { notes.push(x.f.name + ': does not name its PC (it was not made by the collector command), so it was left out.'); return; }
+        var lab = infoLabel(x.info), g = groups.filter(function (q) { return q.label.toLowerCase() === lab.toLowerCase(); })[0];
+        if (!g) { g = { label: lab, sys: x.info.system, files: [] }; groups.push(g); }
+        g.files.push(x);
+      });
+    } else if (good.length) groups = [{ label: label, sys: sys, files: good }];
+    if (!groups.length) { setMsg('err', 'Nothing was added.', notes); return; }
+    var results = [], initial = PCS.length, newCount = 0, chain = Promise.resolve();
+    disarmReset();
+    groups.forEach(function (g) {
+      chain = chain.then(function () {
+        if (mode === 'shared') setStatus('Saving \u201C' + g.label + '\u201D to the shared store\u2026');
+        return addGroup(g, notes, results.map(function (r) { return r.label; })).then(function (r) { results.push(r); if (!r.existed) newCount++; });
+      });
+    });
+    function refresh(keep) {
+      register();
+      state.sel = null;
+      if (!keep) {
+        filesEl.value = '';
+        if (bulk) clearPrefilled(); /* before the trackers are reset, so the fields it filled in are recognised */
+        prefilledSys = ''; prefillNote = ''; bulkReady = false;
+        if (!bulk) {
+          sysEl.value = '';
+          if (!results.length || !results[0].existed) { nameEl.value = ''; ipEl.value = ''; lastPrefill = ''; prefilledIp = ''; }
+        }
+      }
+      updateFileHint();
+      renderAll();
+    }
+    return chain.then(function () {
+      twinNotes(results).forEach(function (n) { notes.push(n); });
+      if (mode === 'local' && !storageOK) notes.push('This browser is blocking storage, so ' + (results.length === 1 ? 'this PC' : 'these PCs') + ' will be lost when you reload the page.');
+      refresh();
+      var count = initial + newCount, there = 'There ' + (count === 1 ? 'is now 1 PC' : 'are now ' + count + ' PCs') + ' on this page.';
+      if (results.length === 1) {
+        var r = results[0];
+        setMsg('ok', (r.existed ? 'Merged into \u201C' : 'Added \u201C') + r.label + '\u201D: ' + r.added + ' new and ' + r.replaced + ' replaced day-and-model rows from ' + r.files + (r.files === 1 ? ' file' : ' files') +
+          (r.ignored ? ', ' + r.ignored + ' non-Claude rows left out' : '') + '. ' + there, notes);
+      } else {
+        var lines = results.map(function (r) { return (r.existed ? 'Merged into \u201C' : 'Added \u201C') + r.label + '\u201D: ' + r.added + ' new and ' + r.replaced + ' replaced day-and-model rows' + (r.ignored ? ', ' + r.ignored + ' non-Claude rows left out' : '') + '.'; });
+        setMsg('ok', 'Saved ' + results.length + ' PCs from ' + good.length + ' files. ' + there, lines.concat(notes));
+      }
+    }, function (w) {
+      var e = w && w.cause ? w.cause : w;
+      latchIfRefused(e);
+      if (results.length) refresh(true); /* keep the files chosen: clicking Add PC again finishes the rest */
+      var saved = results.map(function (r) { return 'Saved \u201C' + r.label + '\u201D.'; });
+      var tail = mode === 'shared'
+        ? ' Part of it may already be saved. ' + (bulk ? 'Click Add PC again to finish' : 'Add the same file again to finish') + '; nothing is counted twice.'
+        : ' Nothing was changed for it.' + (results.length ? ' The PCs before it were saved. Click Add PC again to finish the rest; nothing is counted twice.' : '');
+      setMsg('err', 'Could not save \u201C' + ((w && w.label) || label) + '\u201D. ' + dbErr(e) + tail, saved.concat(notes));
+    });
+  }).then(function () { $('addbtn').disabled = !editable(); }, function () { $('addbtn').disabled = !editable(); });
+}
+
+/* ---------- live usage from a collector ---------- */
+var LIVE_KEY = 'claude-usage-ledger.live.v1', LIVE_EVERY = 60000;
+function validLiveCfg(o) {
+  return !!(o && typeof o === 'object' && typeof o.url === 'string' && o.url.length <= 300 && /^https?:\/\/[^\s\/?#]+(?:\/[^\s?#]*)?$/i.test(o.url) &&
+    (o.key === undefined || o.key === null || (typeof o.key === 'string' && o.key.length <= 300)));
+}
+function normLiveCfg(o) { return { url: o.url.replace(/\/+$/, ''), key: typeof o.key === 'string' ? o.key : '' }; }
+function readLiveLocal() { try { var o = JSON.parse(localStorage.getItem(LIVE_KEY) || 'null'); return validLiveCfg(o) ? normLiveCfg(o) : null; } catch (e) { return null; } }
+function liveSame(a, b) { return JSON.stringify(a || null) === JSON.stringify(b || null); }
+function liveHost(cfg) { if (!cfg) return ''; if (cfg.embedded) return location.host || 'this server'; var m = /^https?:\/\/([^\/?#]+)/i.exec(cfg.url); return m ? m[1] : cfg.url; }
+function liveFeed(cfg) { return (cfg.embedded ? '' : cfg.url) + '/api/usage' + (cfg.key ? '?key=' + encodeURIComponent(cfg.key) : ''); }
+function fmtTime(ms) { try { return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
+function fmtWhen(isoText) { var ms = Date.parse(isoText); if (!isFinite(ms)) return ''; try { return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
+/* the feed is data from a server: keep only what this page can show safely */
+function parseLive(j) {
+  if (!j || typeof j !== 'object' || !Array.isArray(j.members)) return null;
+  var pcs = [], seen = {};
+  j.members.slice(0, 200).forEach(function (m) {
+    if (!m || typeof m !== 'object') return;
+    var label = clean(m.label, 90), low = label.toLowerCase();
+    if (!label || seen[low]) return;
+    seen[low] = 1;
+    var rows = Array.isArray(m.rows) ? m.rows.slice(0, 20000).filter(function (r) { return validRows([r]); }).map(function (r) { return r.slice(); }) : [];
+    pcs.push({ label: label, rows: rows, system: clean(m.system, 200) });
+  });
+  var sessions = [];
+  (Array.isArray(j.sessions) ? j.sessions : []).slice(0, 100).forEach(function (s) {
+    if (!s || typeof s !== 'object') return;
+    var pc = clean(s.pc, 90), id = clean(s.id, 80);
+    if (!pc || !id || !seen[pc.toLowerCase()] || !validNum(s.out) || !validNum(s.all) || !validNum(s.cost)) return;
+    var models = Array.isArray(s.models) ? s.models.filter(function (x) { return typeof x === 'string' && x.indexOf('claude-') === 0 && x.length <= 80; }).slice(0, 12) : [];
+    sessions.push({ pc: pc, id: id, last: typeof s.last === 'string' && isFinite(Date.parse(s.last)) ? s.last.slice(0, 40) : '', models: models, out: s.out, all: s.all, cost: s.cost });
+  });
+  var lastEvent = j.stats && typeof j.stats.lastEvent === 'string' && isFinite(Date.parse(j.stats.lastEvent)) ? j.stats.lastEvent.slice(0, 40) : '';
+  return { pcs: pcs, sessions: sessions, lastEvent: lastEvent };
+}
+function fetchFeed(cfg) {
+  var p;
+  try { p = fetch(liveFeed(cfg), { cache: 'no-store', credentials: 'omit', mode: 'cors' }); } catch (e) { return Promise.reject({ kind: 'net' }); }
+  return p.then(function (r) {
+    if (r.status === 401 || r.status === 403) throw { kind: 'key' };
+    if (!r.ok) throw { kind: 'http', status: r.status };
+    return r.json().then(function (j) { var parsed = parseLive(j); if (!parsed) throw { kind: 'shape' }; return parsed; }, function () { throw { kind: 'shape' }; });
+  }, function () { throw { kind: 'net' }; });
+}
+function setLiveCfg(cfg) {
+  if (liveSame(cfg, live.cfg)) return;
+  live.cfg = cfg; live.seq++; live.busy = false; live.pcs = []; live.sessions = []; live.at = 0; live.lastEvent = ''; live.status = cfg ? 'loading' : ''; live.error = '';
+  if (live.timer) { clearInterval(live.timer); live.timer = 0; }
+  syncLiveForm();
+  if (cfg) {
+    live.timer = setInterval(function () { if (document.visibilityState !== 'hidden') fetchLive(); }, LIVE_EVERY);
+    fetchLive();
+  } else rebuildLive();
+}
+function fetchLive() {
+  var cfg = live.cfg;
+  if (!cfg || live.busy) return;
+  var seq = ++live.seq;
+  live.busy = true;
+  if (live.at) live.flash = ''; /* a confirmation stays until the next refresh */
+  if (!live.at) { live.status = 'loading'; renderLiveNote(); }
+  fetchFeed(cfg).then(function (p) {
+    if (seq !== live.seq) return;
+    live.pcs = p.pcs; live.sessions = p.sessions; live.lastEvent = p.lastEvent; live.at = Date.now(); live.status = 'ok'; live.error = '';
+    rebuildLive();
+  }, function (e) {
+    if (seq !== live.seq) return;
+    live.status = 'error'; live.error = e && e.kind ? e.kind : 'net'; live.errStatus = e && e.status ? e.status : 0;
+    renderLiveNote(); renderSelect(); renderHeader();
+  }).then(function () { if (seq === live.seq) live.busy = false; });
+}
+/* the PC list depends on the mode: shared data is re-applied, local data rebuilt from this browser */
+function rebuildLive() {
+  if (mode === 'shared') { scheduleApply(); renderLiveNote(); return; }
+  var saved = EMBEDDED ? null : readStore();
+  removedSeeds = saved ? saved.removedSeeds : [];
+  PCS = buildPCs(saved);
+  state.sel = null;
+  restoreColors(saved); register(); renderAll();
+}
+document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && live.cfg && Date.now() - live.at > LIVE_EVERY) fetchLive(); });
+function saveLiveCfg(cfg) {
+  var body = cfg ? { url: cfg.url, key: cfg.key || '' } : null;
+  if (mode === 'shared') return mutateMeta(function () { return { live: body }; });
+  try { if (body) localStorage.setItem(LIVE_KEY, JSON.stringify(body)); else localStorage.removeItem(LIVE_KEY); } catch (e) { return Promise.reject({ code: 'storage', message: 'this browser blocked storage' }); }
+  return Promise.resolve();
+}
+/* after a successful save: in shared mode the settings document decides, so update the copy of it and re-apply
+   (the snapshot that follows carries the same value); in local mode apply directly */
+function applyLiveCfg(cfg) {
+  if (mode === 'shared') { shared.meta = Object.assign({}, shared.meta || {}, { live: cfg ? { url: cfg.url, key: cfg.key || '' } : null }); scheduleApply(); }
+  else setLiveCfg(cfg);
+}
+var liveFormFor = null;
+function syncLiveForm() {
+  if (EMBEDDED || liveSame(live.cfg, liveFormFor)) return;
+  liveFormFor = live.cfg;
+  $('liveurl').value = live.cfg ? live.cfg.url : '';
+  $('livekey').value = live.cfg ? live.cfg.key : '';
+}
+function liveMsg(text) { $('livenote').textContent = text; }
+function renderLiveNote() {
+  var cfg = live.cfg, host = liveHost(cfg), txt, on = editable();
+  Array.prototype.forEach.call($('liveform').elements, function (el) { el.disabled = !on; });
+  $('livedrop').hidden = !cfg || EMBEDDED;
+  if (!cfg) txt = EMBEDDED ? '' : (mode === 'connecting' ? 'Connecting to the shared store…' : (on ? 'Not connected to a collector. Run one (the repository’s README explains how), then paste its address and read key above.' : 'Not connected to a collector. Only the owner of this artifact can connect one.'));
+  else if (live.status === 'loading') txt = 'Loading live usage from ' + host + '…';
+  else if (live.status === 'ok') {
+    var n = live.pcs.length, rows = 0;
+    live.pcs.forEach(function (p) { rows += p.rows.length; });
+    txt = (n ? 'Live from ' + host + ': ' + n + (n === 1 ? ' PC' : ' PCs') + ' reporting, ' + rows + ' day-and-model ' + (rows === 1 ? 'row' : 'rows') + '.' : 'Connected to ' + host + ', but no PC has reported yet. Set up each PC from the collector’s setup page (its address followed by /setup?key=READ_KEY).') +
+      ' Updated ' + fmtTime(live.at) + '; refreshes every minute while this page is open.' + (live.lastEvent ? ' Last usage received ' + fmtWhen(live.lastEvent) + '.' : '');
+  } else {
+    var since = live.at ? ' Showing the data loaded at ' + fmtTime(live.at) + '.' : '';
+    if (live.error === 'key') txt = EMBEDDED ? 'This page needs the collector’s read key: open it as /?key=READ_KEY (the READ_KEY value from the collector’s environment).' : 'The collector at ' + host + ' refused the read key. Check READ_KEY in its environment, then connect again.' + since;
+    else if (live.error === 'shape') txt = host + ' answered, but not with a usage feed. Use the collector’s own address, without a path.' + since;
+    else if (live.error === 'http') txt = 'The collector at ' + host + ' answered with an error (HTTP ' + live.errStatus + ').' + since;
+    else txt = 'Could not reach ' + host + '. Is the collector running, and the address right? A collector on a free plan can take up to a minute to wake up; this page tries again every minute.' + since;
+  }
+  if (live.flash) txt = cfg ? live.flash + ' ' + txt : live.flash; /* what the last click did, then the state */
+  $('livenote').textContent = txt;
+  $('live-meta').textContent = cfg && live.status === 'ok' && live.pcs.length ? live.pcs.length + (live.pcs.length === 1 ? ' PC live' : ' PCs live') : '';
+}
+function liveConnect(ev) {
+  ev.preventDefault();
+  if (mode === 'connecting') { liveMsg('Still connecting to the shared store. Try again in a moment.'); return; }
+  if (!canWriteNow()) { liveMsg('You have view-only access to this artifact, so you cannot change the collector.'); return; }
+  var urlEl = $('liveurl'), url = urlEl.value.replace(/\s+/g, '').replace(/\/+$/, ''), key = $('livekey').value.trim();
+  live.flash = '';
+  urlEl.removeAttribute('aria-invalid');
+  if (!validLiveCfg({ url: url, key: key })) {
+    urlEl.setAttribute('aria-invalid', 'true');
+    liveMsg(url ? 'Type the collector’s address like https://name.onrender.com (or http://192.168.1.50:4318 on a local network), with no query string.' : 'Type the collector’s address.');
+    urlEl.focus();
+    return;
+  }
+  var cfg = normLiveCfg({ url: url, key: key });
+  $('livebtn').disabled = true; $('livedrop').disabled = true;
+  liveMsg('Checking ' + liveHost(cfg) + '…');
+  fetchFeed(cfg).then(function (p) {
+    return saveLiveCfg(cfg).then(function () {
+      live.flash = 'Connected.' + (mode === 'shared' ? ' Every device that opens this artifact now shows the same live PCs.' : ' Saved in this browser only.');
+      applyLiveCfg(cfg);
+      renderLiveNote();
+    }, function (e) { latchIfRefused(e); throw { kind: 'save', err: e }; });
+  }).then(null, function (e) {
+    var k = e && e.kind, host = liveHost(cfg);
+    if (k === 'key') liveMsg('The collector at ' + host + ' refused that read key. Copy READ_KEY from the collector’s environment and try again.');
+    else if (k === 'shape') liveMsg(host + ' answered, but not with a usage feed. Use the collector’s own address, without a path.');
+    else if (k === 'http') liveMsg('The collector at ' + host + ' answered with an error (HTTP ' + e.status + ').');
+    else if (k === 'save') liveMsg('The collector works, but the address could not be saved. ' + dbErr(e.err));
+    else liveMsg('Could not reach ' + host + '. Check the address, make sure the collector is running (a free-plan one may need a minute to wake up), and that it is reachable from this browser.');
+  }).then(function () { $('livebtn').disabled = !editable(); $('livedrop').disabled = !editable(); });
+}
+function liveDisconnect() {
+  if (!canWriteNow() || mode === 'connecting') return;
+  $('livebtn').disabled = true; $('livedrop').disabled = true; live.flash = '';
+  saveLiveCfg(null).then(function () { live.flash = 'Disconnected. The PCs the collector reported are no longer shown here' + (mode === 'shared' ? ', on any device.' : '.'); applyLiveCfg(null); renderLiveNote(); },
+    function (e) { latchIfRefused(e); liveMsg('Could not disconnect. ' + dbErr(e)); })
+    .then(function () { $('livebtn').disabled = !editable(); $('livedrop').disabled = !editable(); });
+}
+
+/* ---------- wiring ---------- */
+function renderAll() {
+  renderSelect(); renderHeader(); renderSummary(); renderModels();
+  renderToggles(); renderChart(); renderMatrix(); renderPCs(); renderSessions(); renderLiveNote();
+}
+
+$('pcsel').addEventListener('change', function (e) { state.pc = e.target.value; state.sel = null; renderHeader(); renderSummary(); renderModels(); renderChart(); renderMatrix(); });
+$('addform').addEventListener('submit', addPC);
+$('liveform').addEventListener('submit', liveConnect);
+$('livedrop').addEventListener('click', liveDisconnect);
+function wireCopy(btnId, srcId) {
+  var btn = $(btnId);
+  btn.addEventListener('click', function () {
+    var text = $(srcId).textContent;
+    function done(msg) { btn.textContent = msg; setTimeout(function () { btn.textContent = 'Copy'; }, 1600); }
+    function fallback() {
+      var r = document.createRange(); r.selectNodeContents($(srcId));
+      var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      done('Selected');
+    }
+    try { navigator.clipboard.writeText(text).then(function () { done('Copied'); }, fallback); } catch (e) { fallback(); }
+  });
+}
+wireCopy('copybtn', 'cmdtext');
+wireCopy('copybundle', 'cmdbundle');
+
+var resetTimer = 0, resetArmedAt = 0;
+function disarmReset() {
+  if (!resetTimer) return;
+  clearTimeout(resetTimer); resetTimer = 0;
+  $('resetbtn').textContent = resetLabel();
+}
+$('resetbtn').addEventListener('click', function () {
+  var btn = $('resetbtn');
+  if (!editable()) return;
+  if (!resetTimer) {
+    btn.textContent = 'Click again to confirm the reset';
+    resetArmedAt = Date.now();
+    resetTimer = setTimeout(disarmReset, 4000);
+    return;
+  }
+  if (Date.now() - resetArmedAt < 600) return; /* a double click is not a confirmation */
+  disarmReset();
+  if (mode === 'shared') {
+    btn.disabled = true;
+    setStatus('Removing every added PC from the shared store…');
+    resetSharedStore().then(function () { state.pc = '*'; state.sel = null; setMsg('ok', 'Every added PC was removed on all your devices.'); },
+      function (e) { latchIfRefused(e); setMsg('err', 'Could not reset the shared store. ' + dbErr(e) + ' It may be partly done. Try again to finish.'); })
+      .then(renderModeNote);
+    return;
+  }
+  PCS = buildPCs(null); removedSeeds = []; reg.clear(); state.pc = '*'; state.sel = null;
+  try { localStorage.removeItem(STORE_KEY); storageOK = true; } catch (e) { storageOK = false; }
+  register(); renderAll();
+  setMsg('ok', 'Back to the built-in data.');
+});
+$('resetbtn').addEventListener('blur', disarmReset);
+$('resetbtn').addEventListener('keydown', function (e) { if (e.repeat) e.preventDefault(); }); /* a held Enter key must not confirm */
+
+var lastPrefill = '', prefilledIp = '', prefilledSys = '', prefillNote = '', bulkText = '', changeSeq = 0;
+function updateFileHint() {
+  var n = $('pcfiles').files ? $('pcfiles').files.length : 0, box = $('filehint');
+  var text = n >= 2 ? (bulkReady ? bulkText : n + ' files chosen. They will all go into one PC, named by the name and IP above. To add a different PC, add it separately.') : (n === 1 ? prefillNote : '');
+  box.hidden = !text;
+  box.textContent = text;
+}
+/* name, IP and system that the page itself filled in from a file (never what the person typed) */
+function clearPrefilled() {
+  var nameEl = $('pcname'), ipEl = $('pcip'), sysEl = $('pcsys');
+  if (lastPrefill && nameEl.value.trim() === lastPrefill) nameEl.value = '';
+  if (prefilledIp && ipEl.value.trim() === prefilledIp) ipEl.value = '';
+  if (prefilledSys && sysEl.value.trim() === prefilledSys) sysEl.value = '';
+  lastPrefill = ''; prefilledIp = ''; prefilledSys = '';
+}
+function clean(v, max) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max); }
+$('pcfiles').addEventListener('change', function () {
+  var nameEl = $('pcname'), ipEl = $('pcip'), sysEl = $('pcsys'), fs = this.files, derived = '', m;
+  var seq = ++changeSeq;
+  prefillNote = ''; bulkReady = false; bulkText = '';
+  if (!fs || fs.length !== 1) clearPrefilled(); /* the fields belonged to the previous single file */
+  if (fs && fs.length === 1 && (m = /^usage[_-](.+)\.json$/i.exec(fs[0].name))) {
+    derived = m[1].replace(/\s*\(\d+\)$/, '').trim().slice(0, 60);
+    if (/^name$/i.test(derived)) derived = ''; /* the literal NAME from the command is a placeholder, not a PC */
+  }
+  var cur = nameEl.value.trim();
+  if (!cur || (lastPrefill && cur === lastPrefill)) { nameEl.value = derived; lastPrefill = derived; }
+  updateFileHint();
+  if (fs && fs.length >= 2) {
+    /* every file from the collector command names its own PC: then each file is added as its own PC */
+    var list = Array.prototype.slice.call(fs);
+    Promise.all(list.map(function (f) { return readJSON(f).then(collectorInfo, function () { return null; }); })).then(function (infos) {
+      if (seq !== changeSeq || !infos.every(Boolean)) return;
+      var names = [];
+      infos.forEach(function (i) { var l = infoLabel(i); if (names.indexOf(l) < 0) names.push(l); });
+      bulkReady = true;
+      bulkText = list.length + ' files chosen. Each one names its own PC, so each is added as its own PC: ' + names.slice(0, 8).join(', ') + (names.length > 8 ? ' and ' + (names.length - 8) + ' more' : '') + '. The name, IP and system fields above are not used.';
+      updateFileHint();
+    });
+  }
+  if (fs && fs.length === 1) {
+    var file = fs[0];
+    /* a file from the collector command carries the PC's name, IP and system details: fill them in, never over what the person typed */
+    readJSON(file).then(function (j) {
+      var info = j && !Array.isArray(j) && j.pc && typeof j.pc === 'object' ? j.pc : null;
+      if (!info || seq !== changeSeq) return;
+      var got = [], nm = clean(info.name, 60), ip = clean(info.ip, 45), sy = clean(info.system, 160);
+      if (nm && (!nameEl.value.trim() || nameEl.value.trim() === lastPrefill)) { nameEl.value = nm; lastPrefill = nm; got.push('name'); }
+      if (ip && (!ipEl.value.trim() || ipEl.value.trim() === prefilledIp)) { ipEl.value = ip; prefilledIp = ip; got.push('IP address'); }
+      if (sy && (!sysEl.value.trim() || sysEl.value.trim() === prefilledSys)) { sysEl.value = sy; prefilledSys = sy; got.push('system details'); }
+      prefillNote = got.length ? 'Filled in from the file: ' + got.join(', ') + '. Check them, then click Add PC.' : '';
+      updateFileHint();
+    }, function () { /* not a collector file: the add step reports any problem */ });
+  }
+});
+
+function restoreColors(saved) {
+  if (!saved || !saved.colors.length) return;
+  var present = new Set();
+  PCS.forEach(function (p) { p.rows.forEach(function (r) { present.add(r[1]); }); });
+  saved.colors.forEach(function (m) { if (present.has(m) && !reg.has(m)) reg.set(m, reg.size); });
+}
+/* another tab of this page changed the saved PCs: pick them up instead of overwriting them later */
+window.addEventListener('storage', function (e) {
+  if (mode !== 'local') return;
+  if (e.key === null || e.key === LIVE_KEY) setLiveCfg(readLiveLocal());
+  if (e.key !== null && e.key !== STORE_KEY) return;
+  var saved = applySaved();
+  state.sel = null;
+  restoreColors(saved); register(); renderAll();
+});
+var rz = 0;
+window.addEventListener('resize', function () {
+  cancelAnimationFrame(rz);
+  rz = requestAnimationFrame(function () {
+    var sc = document.querySelector('.plotscroll');
+    if (CH && sc && Math.abs(sc.clientWidth - CH.avail) > 1) renderChart();
+  });
+});
+
+restoreColors(initialSaved);
+register();
+renderAll();
+if (EMBEDDED) {
+  /* served by the collector itself: no files, no stores, just the live feed; the read key travels in the address */
+  document.body.classList.add('embedded');
+  var qkey = ''; try { qkey = new URLSearchParams(location.search).get('key') || ''; } catch (e) {}
+  setLiveCfg({ embedded: true, url: '', key: qkey });
+} else {
+  setLiveCfg(readLiveLocal());
+  connectShared();
+}
+})();
+</script>

@@ -1,0 +1,30 @@
+# Render Blueprint: deploy the collector with one click (New + > Blueprint > this repository).
+# The free plan has no persistent disk, so set GITHUB_BACKUP + GITHUB_TOKEN (below) to keep the
+# usage store across restarts, or switch to the starter plan and uncomment the disk block.
+services:
+  - type: web
+    name: claude-usage-collector
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: "true"
+    startCommand: node collector/server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: INGEST_KEY          # every PC sends this in x-api-key; Render generates it, read it in the dashboard > Environment
+        generateValue: true
+      - key: READ_KEY            # opens the dashboard and the /api/usage feed: https://<service>/?key=READ_KEY
+        generateValue: true
+      - key: REPORT_TZ           # the time zone that decides which day a request belongs to
+        value: UTC
+      - key: DATA_DIR
+        value: ./data
+      - key: GITHUB_BACKUP       # optional: owner/repo that receives data/usage-store.json (needs GITHUB_TOKEN with contents:write)
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+    # disk:                      # starter plan or above: a real disk, then GITHUB_BACKUP is not needed
+    #   name: usage-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
