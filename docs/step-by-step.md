@@ -115,6 +115,8 @@ The address, `READ_KEY`, `INGEST_KEY`. Everything below uses them.
 
 ## C. Each PC (repeat for all seven)
 
+Either paste the per-PC prompt from `docs/deploy.md` (section 2) into Claude Code on that PC with the address, the ingest key and the person's name filled in, and let it do C1 to C5, or do it by hand:
+
 **C1.** In a browser, open `ADDRESS/setup?key=READ_KEY`.
 
 **C2.** Type who uses the PC (for example `harsh`), paste `INGEST_KEY`, click **Make the commands**.
