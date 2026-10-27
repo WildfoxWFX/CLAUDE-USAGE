@@ -27,6 +27,8 @@ node collector/server.js
 
 Put it behind your usual HTTPS reverse proxy (nginx, Caddy) or open the port, and keep it running with systemd or pm2. Check `https://<collector>/healthz`. Data lives in `data/store.json`.
 
+On a Windows server: keep the code in `C:\apps\claude-usage`, put the variables in a file such as `C:\ProgramData\claude-usage\claude-usage.env` readable only by administrators and the service account, and run `node --env-file=C:\ProgramData\claude-usage\claude-usage.env collector\server.js` as a service with NSSM (its own virtual account, restart on exit). NSSM stops it with Ctrl+C, which the collector handles as a clean shutdown. Logs go where NSSM is told to write stdout and stderr. On Windows run the tests as `node --test --test-timeout=60000 collector/test/*.test.js agent/test/*.test.js`; the GitHub-mirror shutdown check is skipped there because a Windows process kill is not a graceful stop.
+
 Other hosts: `render.yaml` is a Render blueprint (the free plan has no disk, so set `GITHUB_BACKUP` and `GITHUB_TOKEN` to mirror the store into a repository), and the `Dockerfile` builds an image that keeps its data in `/data`.
 
 | Variable | Meaning |
@@ -34,7 +36,7 @@ Other hosts: `render.yaml` is a Render blueprint (the free plan has no disk, so 
 | `INGEST_KEY` | Required. Agents and telemetry send it in `x-api-key`. It also opens the feed, so `usage_summary` works on every PC without more setup. Anyone holding it can post usage, so treat it like a password; each PC's id is still protected by its own token. |
 | `READ_KEY` | Protects the dashboard, the setup page and `/api/usage`. Empty means open to anyone with the address. |
 | `REPORT_TZ` | Time zone that decides which day a request belongs to; agents follow it. Default `UTC`. |
-| `PORT`, `DATA_DIR` | Default `4318` and `./data`. |
+| `PORT`, `BIND`, `DATA_DIR` | Default `4318`, every interface, `./data`. Set `BIND=127.0.0.1` when Caddy or nginx fronts the collector, and keep the port closed in the firewall. |
 | `PRICES_URL`, `PRICES_FILE` | Prices refresh from LiteLLM at start (`off` disables); `data/prices.json` overrides or adds models (`{"claude-x": {"in": 3, "out": 15, "cw": 3.75, "cr": 0.3, "cw1h": 6}}` per million tokens). |
 | `GITHUB_BACKUP`, `GITHUB_TOKEN` | Optional mirror of the store to `owner/repo`; `GITHUB_BACKUP_PATH`, `GITHUB_BACKUP_BRANCH` refine it. |
 | `MAX_BODY_BYTES` | Largest accepted POST, default 8 MB. |

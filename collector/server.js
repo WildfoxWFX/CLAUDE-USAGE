@@ -22,6 +22,7 @@ const prices = require('./prices');
 
 const env = process.env;
 const PORT = env.PORT === undefined || env.PORT === '' ? 4318 : Number(env.PORT);
+const BIND = (env.BIND || '').trim(); /* e.g. 127.0.0.1 behind a reverse proxy; empty = every interface */
 const INGEST_KEY = (env.INGEST_KEY || '').trim();
 const READ_KEY = (env.READ_KEY || '').trim();
 const DATA_DIR = path.resolve(env.DATA_DIR || path.join(__dirname, '..', 'data'));
@@ -548,9 +549,10 @@ async function main() {
 
   const server = http.createServer((req, res) => { handle(req, res).catch((e) => { log('error: ' + (e && e.stack || e)); if (!res.headersSent) send(res, 500, { error: 'internal error' }); else res.end(); }); });
   server.requestTimeout = 30000;
-  server.listen(PORT, () => {
-    log('collector listening on port ' + server.address().port + ' (zone ' + TZ + ', data in ' + DATA_DIR + (ghOn() ? ', mirrored to github.com/' + GH.repo : '') + ')');
-  });
+  const onListen = () => {
+    log('collector listening on port ' + server.address().port + (BIND ? ' of ' + BIND : '') + ' (zone ' + TZ + ', data in ' + DATA_DIR + (ghOn() ? ', mirrored to github.com/' + GH.repo : '') + ')');
+  };
+  if (BIND) server.listen(PORT, BIND, onListen); else server.listen(PORT, onListen);
   let stopping = false;
   async function stop(sig) {
     if (stopping) return; stopping = true;

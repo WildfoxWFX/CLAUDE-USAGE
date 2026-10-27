@@ -30,14 +30,19 @@ function start(extraEnv) {
     proc.on('exit', (code) => { if (!done) { done = true; clearTimeout(timer); reject(new Error('server exited with ' + code + ': ' + out.join(''))); } });
   });
 }
+/* on Windows a signal is a plain kill (no graceful shutdown), and a killed process has exitCode null with signalCode set */
+const gone = (proc) => proc.exitCode !== null || proc.signalCode !== null;
 function stop(proc) {
   return new Promise((resolve) => {
-    if (proc.exitCode !== null) return resolve();
-    proc.on('exit', () => resolve());
+    if (gone(proc)) return resolve();
+    const done = () => resolve();
+    proc.once('exit', done);
     proc.kill('SIGTERM');
-    setTimeout(() => { if (proc.exitCode === null) proc.kill('SIGKILL'); }, 10000).unref();
+    setTimeout(() => { if (!gone(proc)) proc.kill('SIGKILL'); }, 10000).unref();
+    setTimeout(done, 20000).unref();
   });
 }
+const WINDOWS = process.platform === 'win32';
 
 function kv(key, value) {
   let v;
@@ -93,4 +98,4 @@ async function get(url, headers) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(fn, ms) { const t0 = Date.now(); while (Date.now() - t0 < (ms || 4000)) { if (await fn()) return true; await sleep(30); } return false; }
 
-module.exports = { start, stop, tmpdir, otlp, multi, apiReq, kv, toAttrs, post, get, sleep, until };
+module.exports = { start, stop, gone, WINDOWS, tmpdir, otlp, multi, apiReq, kv, toAttrs, post, get, sleep, until };

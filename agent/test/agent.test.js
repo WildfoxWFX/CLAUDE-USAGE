@@ -285,7 +285,7 @@ test('a zone change retracts the rows that moved: the collector never double cou
       rows = (await H.get(col2.url + '/api/usage' + K)).json.members[0].rows;
       assert.deepEqual(rows.map((x) => [x[0], x[1]]), [['2026-10-18', 'claude-sonnet-5-5'], ['2026-10-19', 'claude-opus-4-1-20250805']]);
     } finally { await col2.stop(); }
-  } finally { if (col.proc.exitCode === null) await col.stop(); }
+  } finally { if (!H.gone(col.proc)) await col.stop(); }
 });
 
 test('a renamed person or a new collector gets the whole history, not only new days', async () => {
@@ -399,7 +399,7 @@ test('as an MCP server the first snapshot waits for the collector’s zone', asy
     const rows = (await H.get(col.url + '/api/usage' + K)).json.members[0].rows;
     assert.deepEqual(rows.map((x) => [x[0], x[1]]), [['2026-10-19', 'claude-opus-4-1-20250805']], 'bucketed in the collector’s zone, nothing stale');
     assert.ok(a.stderr.join('').indexOf('recounting') < 0, a.stderr.join(''));
-  } finally { if (a.proc.exitCode === null) a.proc.kill(); await proxy.close(); await col.stop(); }
+  } finally { if (!H.gone(a.proc)) a.proc.kill(); await proxy.close(); await col.stop(); }
 });
 
 /* drive the agent as Claude Code would: JSON-RPC over stdio */
@@ -460,7 +460,7 @@ test('as an MCP server: handshake, tools, sync on start, final send on exit', as
     assert.equal(ex.code, 0, 'exits cleanly: ' + JSON.stringify(ex));
     assert.deepEqual((await H.get(col.url + '/api/usage' + K)).json.members[0].rows.find((x) => x[1] === 'claude-sonnet-5-5').slice(2, 4), [112, 72]);
     assert.ok(a.raw.every((l) => !l.startsWith('UNPARSEABLE')), 'stdout carried only JSON-RPC: ' + a.raw.filter((l) => l.startsWith('UNPARSEABLE')).join(' | '));
-  } finally { if (a.proc.exitCode === null) a.proc.kill(); await col.stop(); }
+  } finally { if (!H.gone(a.proc)) a.proc.kill(); await col.stop(); }
 });
 
 test('as an MCP server without a reachable collector: tools still answer, nothing crashes', async () => {
@@ -478,5 +478,5 @@ test('as an MCP server without a reachable collector: tools still answer, nothin
     a.proc.stdin.end();
     const ex = await Promise.race([a.exited, new Promise((r) => setTimeout(() => r({ code: 'timeout' }), 10000))]);
     assert.equal(ex.code, 0);
-  } finally { if (a.proc.exitCode === null) a.proc.kill(); }
+  } finally { if (!H.gone(a.proc)) a.proc.kill(); }
 });
