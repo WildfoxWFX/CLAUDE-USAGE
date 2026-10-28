@@ -16,7 +16,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const env = process.env;
 const URL_BASE = (env.USAGE_URL || '').trim().replace(/\/+$/, '');
 const KEY = (env.USAGE_KEY || '').trim();
@@ -341,7 +341,9 @@ function systemString() {
 }
 const client = { name: '', version: '' };
 async function fetchJSON(url, opts, timeoutMs) {
-  const r = await fetch(url, Object.assign({ signal: AbortSignal.timeout(timeoutMs || 20000) }, opts || {}));
+  const o = Object.assign({ signal: AbortSignal.timeout(timeoutMs || 20000) }, opts || {});
+  o.headers = Object.assign({ connection: 'close' }, o.headers || {}); /* no lingering socket, so a one-shot run ends by itself */
+  const r = await fetch(url, o);
   const text = await r.text();
   let json = null; try { json = JSON.parse(text); } catch (e) {}
   return { status: r.status, ok: r.ok, json, text };
@@ -534,7 +536,9 @@ function serve() {
     if (timer) clearInterval(timer);
     log(why + ': final send');
     try { await Promise.race([cycle(false, 'exit'), new Promise((r) => setTimeout(r, 4000))]); } catch (e) {}
-    process.exit(0);
+    process.exitCode = 0;
+    try { process.stdin.destroy(); } catch (e) {}
+    setTimeout(() => process.exit(0), 1500).unref(); /* only if something still holds the loop open */
   }
   process.stdin.on('end', () => stop('Claude Code closed the connection'));
   process.stdin.on('close', () => stop('stdin closed'));
@@ -550,15 +554,17 @@ async function main() {
   loadState();
   if (argv.indexOf('--status') >= 0) { console.log(toolStatus()); return; }
   if (argv.indexOf('--once') >= 0) {
-    if (!URL_BASE || !KEY) { console.error('Set USAGE_URL and USAGE_KEY (and USAGE_MEMBER).'); process.exit(2); }
+    if (!URL_BASE || !KEY) { console.error('Set USAGE_URL and USAGE_KEY (and USAGE_MEMBER).'); process.exitCode = 2; return; }
     await learnZone();
     const r = await cycle(argv.indexOf('--everything') >= 0, 'once');
     console.log(describe(r));
-    process.exit(r.sync.sent || r.sync.upToDate ? 0 : 1);
+    /* set the code and let the process end on its own: process.exit() right after a request crashes Node on Windows */
+    process.exitCode = r.sync.sent || r.sync.upToDate ? 0 : 1;
+    return;
   }
   if (argv.indexOf('--summary') >= 0) { console.log(await toolSummary({ days: 7 })); return; }
   if (!URL_BASE || !KEY) log('USAGE_URL or USAGE_KEY is not set: usage is counted but cannot be sent');
   serve();
 }
-if (require.main === module) main().catch((e) => { log('fatal:', e && e.stack || e); process.exit(1); });
+if (require.main === module) main().catch((e) => { log('fatal:', e && e.stack || e); process.exitCode = 1; });
 module.exports = { parseLine, parseLedger, readFrom, dayOf, slug, systemString, TOOLS, VERSION };
