@@ -22,6 +22,22 @@ try { $feed = Invoke-RestMethod -Uri "$Collector/api/usage" -Headers @{ 'x-read-
 catch { throw "Could not read $Collector/api/usage : $($_.Exception.Message)" }
 if (-not $feed.ok) { throw 'The collector did not return a usage feed.' }
 
+if ($feed.account -and $feed.account.windows) {
+  $a = $feed.account
+  $planText = if ($a.plan) { "$($a.plan) plan, " } else { '' }
+  $checkedText = 'checked ' + ([datetime]$a.checkedAt).ToLocalTime().ToString('yyyy-MM-dd HH:mm')
+  if ($a.byLabel) { $checkedText += " on $($a.byLabel)" }
+  Write-Host "Account limits ($planText$checkedText):"
+  $names = [ordered]@{ fiveHour = '5-hour window'; sevenDay = 'Weekly, all models'; sevenDayOpus = 'Weekly, Opus'; sevenDaySonnet = 'Weekly, Sonnet' }
+  foreach ($k in $names.Keys) {
+    $w = $a.windows.$k
+    if (-not $w) { continue }
+    $bar = ('#' * [math]::Round($w.pct / 5)).PadRight(20, '.')
+    $reset = if ($w.resetsAt) { ' resets ' + ([datetime]$w.resetsAt).ToLocalTime().ToString('ddd HH:mm') } else { '' }
+    Write-Host ("  {0,-20} [{1}] {2,5:N1}%{3}" -f $names[$k], $bar, $w.pct, $reset)
+  }
+  Write-Host ''
+}
 $since = (Get-Date).AddDays(1 - $Days).ToString('yyyy-MM-dd')
 function Sum($rows, $i) { [double](($rows | ForEach-Object { $_[$i] } | Measure-Object -Sum).Sum) }
 $members = @($feed.members | Where-Object { -not $PC -or $_.label -like "*$PC*" -or $_.id -like "*$PC*" })

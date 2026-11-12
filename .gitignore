@@ -6,3 +6,9 @@ usage_*.json
 # never commit a real settings.json: it holds the ingest key
 settings.json
 !docs/settings.example.json
+
+# built copies of the page and the ccusage input it is built from
+ledger/daily.json
+ledger/session.json
+ledger/claude-usage-ledger.html
+ledger/page.js

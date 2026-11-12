@@ -6,6 +6,7 @@
      POST /v1/metrics|traces  accepted and dropped, so enabling those exporters does no harm
      POST /v1/usage           snapshots from the local usage agent (agent/agent.js): per-day totals that replace what is held
      DELETE /api/members/<id> forget one member (READ_KEY), e.g. after a rename
+     POST /v1/limits          the account's rate-limit meter (5-hour / weekly utilisation) read by an agent from Claude Code
      GET  /agent.js           the agent itself, for the install command on the setup page
      GET  /api/usage?key=     the usage feed the ledger reads (READ_KEY, if set)
      GET  /?key=              the ledger itself, live
@@ -63,12 +64,15 @@ function bareCopy(v, depth) {
   Object.keys(v).forEach((k) => { if (!safeKey(k)) return; out[k] = depth > 0 && v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]) ? bareCopy(v[k], depth - 1) : v[k]; });
   return out;
 }
-const store = { version: 1, members: bare(), days: bare(), sessions: bare(), seen: [], stats: { events: 0, duplicates: 0, other: 0, skipped: 0, lastEvent: '', lastBatch: '' } };
+const store = { version: 1, members: bare(), days: bare(), sessions: bare(), seen: [], account: null, limitHistory: [], stats: { events: 0, duplicates: 0, other: 0, skipped: 0, lastEvent: '', lastBatch: '' } };
+const LIMIT_HISTORY_DAYS = 8, LIMIT_HISTORY_MAX = 4000, LIMIT_WINDOWS = ['fiveHour', 'sevenDay', 'sevenDayOpus', 'sevenDaySonnet'];
 let seenSet = new Set(), seenList = [];
 function adopt(o) {
   if (!o || typeof o !== 'object' || o.version !== 1) return false;
   const obj = (v, depth) => bareCopy(v, depth);
   store.members = obj(o.members, 1); store.days = obj(o.days, 2); store.sessions = obj(o.sessions, 1);
+  store.account = o.account && typeof o.account === 'object' && !Array.isArray(o.account) ? o.account : null;
+  store.limitHistory = Array.isArray(o.limitHistory) ? o.limitHistory.filter((h) => h && typeof h.at === 'string').slice(-LIMIT_HISTORY_MAX) : [];
   store.stats = Object.assign(store.stats, obj(o.stats));
   seenList = Array.isArray(o.seen) ? o.seen.filter((x) => typeof x === 'string').slice(-MAX_SEEN) : [];
   seenSet = new Set(seenList);
@@ -349,6 +353,40 @@ function applySnapshot(b, ip) {
   return { days: nd, sessions: ns, rejected, removed };
 }
 
+/* ---------- the account's rate-limit meter ---------- */
+/* An agent reads Claude Code's own view of the subscription's limits (5-hour and weekly windows, as percentages)
+   and posts it here. The account is shared, so there is one current reading, kept with a short history. */
+function pctOr(v) { const n = typeof v === 'number' ? v : Number(v); return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n * 10) / 10)) : null; }
+function applyLimits(b, memberId) {
+  const L = b.limits && typeof b.limits === 'object' && !Array.isArray(b.limits) ? b.limits : null;
+  if (!L) throw snapshotError('limits is missing');
+  const src = L.windows && typeof L.windows === 'object' && !Array.isArray(L.windows) ? L.windows : {};
+  const windows = {};
+  LIMIT_WINDOWS.forEach((k) => {
+    const w = src[k];
+    if (!w || typeof w !== 'object') return;
+    const pct = pctOr(w.pct);
+    if (pct === null) return;
+    const resetsAt = isoOr(w.resetsAt);
+    windows[k] = { pct, resetsAt: resetsAt && Date.parse(resetsAt) > Date.now() - 36e5 ? new Date(Date.parse(String(w.resetsAt))).toISOString() : resetsAt };
+  });
+  if (!Object.keys(windows).length) throw snapshotError('limits has no usable window');
+  const checkedAt = isoOr(L.checkedAt) || new Date().toISOString();
+  const account = { plan: str(L.plan, 40), windows, checkedAt, by: memberId };
+  const prev = store.account;
+  store.account = account;
+  const last = store.limitHistory[store.limitHistory.length - 1];
+  const point = { at: checkedAt };
+  LIMIT_WINDOWS.forEach((k) => { if (windows[k]) point[k] = windows[k].pct; });
+  /* one point per reading, but not more often than every 5 minutes unless a value moved */
+  const moved = !last || LIMIT_WINDOWS.some((k) => (last[k] === undefined ? windows[k] !== undefined : last[k] !== point[k]));
+  if (!last || moved || Date.parse(checkedAt) - Date.parse(last.at) >= 5 * 60000) store.limitHistory.push(point);
+  const cutoff = new Date(Date.now() - LIMIT_HISTORY_DAYS * 86400000).toISOString();
+  store.limitHistory = store.limitHistory.filter((h) => h.at >= cutoff).slice(-LIMIT_HISTORY_MAX);
+  markDirty();
+  return { windows: Object.keys(windows), changed: !prev || JSON.stringify(prev.windows) !== JSON.stringify(windows) };
+}
+
 /* ---------- the usage feed ---------- */
 const OS_NAMES = { windows: 'Windows', win32: 'Windows', linux: 'Linux', darwin: 'macOS', macos: 'macOS' };
 function labelOf(m) {
@@ -384,7 +422,8 @@ function usagePayload() {
     const s = store.sessions[id];
     return { pc: labelById[s.member] || '', id, last: s.last, models: Object.keys(s.models).sort(), out: s.out, all: s.in + s.out + s.cw + s.cr, cost: round6(s.cost) };
   }).filter((s) => s.pc).sort((a, b) => b.cost - a.cost).slice(0, 50);
-  return { ok: true, generated: new Date().toISOString(), tz: TZ, members: out, sessions, stats: store.stats, pricing: prices.sources(Array.from(models)) };
+  const account = store.account ? Object.assign({}, store.account, { byLabel: labelById[store.account.by] || '' }) : null;
+  return { ok: true, generated: new Date().toISOString(), tz: TZ, members: out, sessions, stats: store.stats, pricing: prices.sources(Array.from(models)), account, limitHistory: store.limitHistory };
 }
 
 /* ---------- pages ---------- */
@@ -497,6 +536,23 @@ async function handle(req, res) {
     try { r = applySnapshot(body, clientIp(req)); } catch (e) { if (e.code === 'bad_snapshot') { if (e.status === 403) log('refused snapshot for ' + str(body.member && body.member.id, 120) + ' from ' + (clientIp(req) || '?') + ': token mismatch'); return send(res, e.status || 400, { error: e.message }); } throw e; }
     log('snapshot from ' + (clientIp(req) || '?') + ' for ' + str(body.member.id, 120) + ': ' + r.days + ' day rows, ' + r.sessions + ' sessions' + (r.removed ? ', ' + r.removed + ' removed' : '') + (r.rejected ? ', ' + r.rejected + ' rejected' : '') + (body.full ? ' (full)' : ''));
     return send(res, 200, { ok: true, tz: TZ, days: r.days, sessions: r.sessions, rejected: r.rejected, removed: r.removed });
+  }
+  if (method === 'POST' && p === '/v1/limits') {
+    if (!ingestOK(req)) return send(res, 401, { error: 'The x-api-key header does not match the collector\u2019s INGEST_KEY.' });
+    let text;
+    try { text = await readBody(req); } catch (e) { return send(res, e.code === 'too_large' ? 413 : 400, { error: e.message }, { connection: 'close' }); }
+    let body;
+    try { body = JSON.parse(text); } catch (e) { return send(res, 400, { error: 'The body is not JSON.' }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'The body is not a limits reading.' });
+    const mem = body.member && typeof body.member === 'object' ? body.member : {};
+    const id = str(mem.id, 120);
+    if (!id || !safeKey(id)) return send(res, 400, { error: 'member.id is missing or not allowed' });
+    const m = store.members[id];
+    if (m && m.tokenHash) { const token = str(mem.token, 200); if (!token || tokenHash(token) !== m.tokenHash) return send(res, 403, { error: 'another installation already reports as \u201C' + id + '\u201D.' }); }
+    let r;
+    try { r = applyLimits(body, id); } catch (e) { if (e.code === 'bad_snapshot') return send(res, 400, { error: e.message }); throw e; }
+    if (r.changed) log('limits from ' + id + ': ' + r.windows.map((k) => k + ' ' + store.account.windows[k].pct + '%').join(', '));
+    return send(res, 200, { ok: true, windows: r.windows });
   }
   if (req.method === 'DELETE' && /^\/api\/members\/[^/]+$/.test(p)) {
     if (!readOK(req, u)) return send(res, 401, { error: 'A read key is needed.' });

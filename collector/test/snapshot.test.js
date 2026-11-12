@@ -209,3 +209,55 @@ test('timestamps from the future are clamped and one member cannot push anotherâ
     assert.equal(steal.json.rejected, 1);
   } finally { await s.stop(); }
 });
+
+test('the account limit meter: one reading, bounded history, same identity rules', async () => {
+  const s = await start({ DATA_DIR: tmpdir() });
+  try {
+    const soon = new Date(Date.now() + 2 * 3600e3).toISOString(), week = new Date(Date.now() + 3 * 86400e3).toISOString();
+    const body = { member: { id: 'sathish@desktop-2ap2rit', token: 'tok-S' }, limits: { plan: 'max', checkedAt: new Date().toISOString(), windows: { fiveHour: { pct: 42.44, resetsAt: soon }, sevenDay: { pct: '67', resetsAt: week }, sevenDayOpus: { pct: 12, resetsAt: week }, bogus: { pct: 5 } } } };
+    assert.equal((await post(s.url + '/v1/limits', body, { key: 'nope' })).status, 401);
+    let r = await post(s.url + '/v1/limits', body);
+    assert.equal(r.status, 200); assert.deepEqual(r.json, { ok: true, windows: ['fiveHour', 'sevenDay', 'sevenDayOpus'] });
+    let u = (await get(s.url + '/api/usage' + K)).json;
+    assert.equal(u.account.plan, 'max'); assert.equal(u.account.windows.fiveHour.pct, 42.4); assert.equal(u.account.windows.sevenDay.pct, 67); assert.equal(u.account.windows.sevenDay.resetsAt, week);
+    assert.equal(u.account.by, 'sathish@desktop-2ap2rit'); assert.equal(u.account.byLabel, '', 'no snapshot yet, so no label');
+    assert.equal(u.limitHistory.length, 1); assert.equal(u.limitHistory[0].fiveHour, 42.4);
+    /* the same reading again within five minutes adds no point; a moved value does */
+    await post(s.url + '/v1/limits', body);
+    body.limits.windows.fiveHour.pct = 43;
+    await post(s.url + '/v1/limits', body);
+    u = (await get(s.url + '/api/usage' + K)).json;
+    assert.equal(u.limitHistory.length, 2); assert.equal(u.account.windows.fiveHour.pct, 43);
+    /* a member bound by a snapshot token refuses another token here too */
+    await post(s.url + '/v1/usage', snap({ member: { id: 'sathish@desktop-2ap2rit', name: 'sathish', host: 'DESKTOP-2AP2RIT', token: 'tok-S' } }));
+    assert.equal((await post(s.url + '/v1/limits', Object.assign({}, body, { member: { id: 'sathish@desktop-2ap2rit', token: 'tok-X' } }))).status, 403);
+    assert.equal((await post(s.url + '/v1/limits', body)).status, 200);
+    u = (await get(s.url + '/api/usage' + K)).json;
+    assert.equal(u.account.byLabel, 'sathish Â· DESKTOP-2AP2RIT');
+    /* bad readings */
+    assert.equal((await post(s.url + '/v1/limits', { member: { id: 'x' }, limits: { windows: { fiveHour: { pct: 'abc' } } } })).status, 400);
+    assert.equal((await post(s.url + '/v1/limits', { member: { id: '__proto__' }, limits: { windows: { fiveHour: { pct: 1 } } } })).status, 400);
+    assert.equal((await post(s.url + '/v1/limits', { member: { id: 'x' } })).status, 400);
+    const over = await post(s.url + '/v1/limits', { member: { id: 'y' }, limits: { windows: { fiveHour: { pct: 250 }, sevenDay: { pct: -5 } } } });
+    assert.equal(over.status, 200);
+    u = (await get(s.url + '/api/usage' + K)).json;
+    assert.equal(u.account.windows.fiveHour.pct, 100); assert.equal(u.account.windows.sevenDay.pct, 0);
+    /* it survives a restart */
+  } finally { await s.stop(); }
+});
+
+test('limit readings survive a restart and old history is dropped', async () => {
+  const dir = tmpdir();
+  let s = await start({ DATA_DIR: dir });
+  try {
+    await post(s.url + '/v1/limits', { member: { id: 'a' }, limits: { plan: 'max', checkedAt: new Date(Date.now() - 10 * 86400e3).toISOString(), windows: { fiveHour: { pct: 1 } } } });
+    await post(s.url + '/v1/limits', { member: { id: 'a' }, limits: { plan: 'max', checkedAt: new Date().toISOString(), windows: { fiveHour: { pct: 2 } } } });
+    assert.ok(await until(() => fs.existsSync(path.join(dir, 'store.json'))));
+  } finally { await s.stop(); }
+  s = await start({ DATA_DIR: dir });
+  try {
+    const u = (await get(s.url + '/api/usage' + K)).json;
+    assert.equal(u.account.windows.fiveHour.pct, 2);
+    assert.equal(u.limitHistory.length, 1, 'the ten-day-old point is gone');
+  } finally { await s.stop(); }
+});

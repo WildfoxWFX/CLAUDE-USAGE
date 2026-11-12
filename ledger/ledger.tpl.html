@@ -167,6 +167,19 @@ details.tableview .tablewrap { max-height: 280px; overflow-y: auto; margin-top: 
 .pclist .who .sys { font: 400 12px/1.4 var(--sans); color: var(--ink2); overflow-wrap: anywhere; margin-top: 2px; }
 .pclist .who span { display: block; font: 400 12px var(--mono); color: var(--muted); }
 
+.limits { margin-top: 28px; }
+.meters { list-style: none; padding: 0; margin: 12px 0 0; max-width: 760px; }
+.meter { display: grid; grid-template-columns: 11rem minmax(0,1fr) 11rem; gap: 6px 14px; align-items: center; padding: 10px 0; border-top: 1px solid var(--hair); --c: var(--s1); }
+.meter.warn { --c: var(--s4); }
+.meter.danger { --c: var(--bad); }
+.meter .name { font-size: 13px; color: var(--ink2); }
+.meter .track { position: relative; height: 10px; border-radius: 5px; background: var(--hair); overflow: hidden; }
+@supports (background: color-mix(in oklab, red 20%, white)) { .meter .track { background: color-mix(in oklab, var(--c) 18%, var(--plane)); } }
+.meter .fill { position: absolute; inset: 0 auto 0 0; border-radius: 5px; background: var(--c); min-width: 2px; }
+.meter .fig { font: 600 15px/1.2 var(--sans); text-align: right; white-space: nowrap; }
+.meter .fig small { display: block; font: 400 11px/1.3 var(--mono); color: var(--muted); white-space: normal; }
+.meter .state { font: 500 11px/1 var(--mono); color: var(--c); margin-left: 6px; }
+@media (max-width: 560px) { .meter { grid-template-columns: minmax(0,1fr) 10rem; } .meter .track { grid-column: 1 / -1; } }
 .livetag { font: 500 11px/1 var(--mono); color: var(--good); border: 1px solid currentColor; border-radius: 3px; padding: 4px 6px; margin-top: 3px; white-space: nowrap; }
 body.embedded #addsec, body.embedded #liveform, body.embedded #livehelp { display: none; }
 footer { margin-top: 44px; padding-top: 14px; border-top: 1px solid var(--hair2); font-size: 12px; color: var(--muted); }
@@ -191,6 +204,12 @@ footer p { max-width: 90ch; }
   </div>
 
   <section class="strip" id="strip" aria-label="Summary"></section>
+
+  <section class="sec limits" id="limits" aria-labelledby="h-limits" hidden>
+    <div class="sec-head"><h2 id="h-limits">Account limits</h2><span class="meta" id="limits-meta"></span></div>
+    <p class="help">How much of the subscription’s rate limits the whole account has used, as Claude Code reports them. Chats on claude.ai, Claude Desktop and Claude Code on every PC all count against the same limits.</p>
+    <ul class="meters" id="meterlist"></ul>
+  </section>
 
   <section class="sec" aria-labelledby="h-models">
     <div class="sec-head"><h2 id="h-models">Usage by model</h2><span class="meta" id="models-meta"></span></div>
@@ -299,7 +318,7 @@ var METRICS = [['cost', 'Cost'], ['all', 'All tokens'], ['out', 'Output tokens']
 var OTHER = '__other__';
 var CH = null;
 /* PCs reported by a collector (see 'Live usage from every PC'): shown live, never stored by this page */
-var live = { cfg: null, pcs: [], sessions: [], status: '', error: '', errStatus: 0, at: 0, timer: 0, seq: 0, busy: false, lastEvent: '', migrated: false, flash: '' };
+var live = { cfg: null, pcs: [], sessions: [], account: null, status: '', error: '', errStatus: 0, at: 0, timer: 0, seq: 0, busy: false, lastEvent: '', migrated: false, flash: '' };
 
 /* ---------- PCs saved in this browser only ----------
    Only the PCs the viewer added are stored (plus which built-in PCs they removed and the colour order),
@@ -1377,7 +1396,60 @@ function parseLive(j) {
     sessions.push({ pc: pc, id: id, last: typeof s.last === 'string' && isFinite(Date.parse(s.last)) ? s.last.slice(0, 40) : '', models: models, out: s.out, all: s.all, cost: s.cost });
   });
   var lastEvent = j.stats && typeof j.stats.lastEvent === 'string' && isFinite(Date.parse(j.stats.lastEvent)) ? j.stats.lastEvent.slice(0, 40) : '';
-  return { pcs: pcs, sessions: sessions, lastEvent: lastEvent };
+  return { pcs: pcs, sessions: sessions, lastEvent: lastEvent, account: parseAccount(j.account) };
+}
+/* the account's rate-limit reading: percentages per window, as the collector holds them */
+var LIMIT_WINDOWS = [['fiveHour', '5-hour window'], ['sevenDay', 'Weekly, all models'], ['sevenDayOpus', 'Weekly, Opus'], ['sevenDaySonnet', 'Weekly, Sonnet']];
+function parseAccount(a) {
+  if (!a || typeof a !== 'object' || !a.windows || typeof a.windows !== 'object') return null;
+  var windows = {}, n = 0;
+  LIMIT_WINDOWS.forEach(function (w) {
+    var x = a.windows[w[0]];
+    if (!x || typeof x !== 'object' || typeof x.pct !== 'number' || !isFinite(x.pct)) return;
+    windows[w[0]] = { pct: Math.max(0, Math.min(100, x.pct)), resetsAt: typeof x.resetsAt === 'string' && isFinite(Date.parse(x.resetsAt)) ? x.resetsAt : '' };
+    n++;
+  });
+  if (!n) return null;
+  return { plan: clean(a.plan, 40), windows: windows, checkedAt: typeof a.checkedAt === 'string' && isFinite(Date.parse(a.checkedAt)) ? a.checkedAt : '', byLabel: clean(a.byLabel, 90) };
+}
+function fmtUntil(iso) {
+  var ms = Date.parse(iso) - Date.now();
+  if (!isFinite(ms)) return '';
+  if (ms <= 0) return 'window has reset';
+  var m = Math.round(ms / 60000), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  var rel = d ? d + ' d ' + h + ' h' : (h ? h + ' h ' + mm + ' min' : mm + ' min');
+  var at = new Date(Date.parse(iso));
+  var when = d ? at.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return 'resets in ' + rel + ' (' + when + ')';
+}
+function fmtAgo(iso) {
+  var m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  if (!isFinite(m)) return '';
+  if (m < 1) return 'just now';
+  if (m < 60) return m + ' min ago';
+  if (m < 1440) return Math.round(m / 60) + ' h ago';
+  return fmtWhen(iso);
+}
+function renderLimits() {
+  var sec = $('limits'), a = live.account;
+  if (!a) { sec.hidden = true; $('meterlist').replaceChildren(); return; }
+  sec.hidden = false;
+  var plan = a.plan ? a.plan.charAt(0).toUpperCase() + a.plan.slice(1) + ' plan' : '';
+  $('limits-meta').textContent = [plan, a.checkedAt ? 'checked ' + fmtAgo(a.checkedAt) : '', a.byLabel ? 'on ' + a.byLabel : ''].filter(Boolean).join(' · ');
+  var items = [];
+  LIMIT_WINDOWS.forEach(function (w) {
+    var x = a.windows[w[0]];
+    if (!x) return;
+    var sev = x.pct >= 90 ? 'danger' : (x.pct >= 75 ? 'warn' : 'ok');
+    var state = sev === 'danger' ? 'near the limit' : (sev === 'warn' ? 'high' : '');
+    var pctText = (Math.round(x.pct * 10) / 10) + '% used';
+    items.push(h('li', { class: 'meter ' + sev },
+      h('span', { class: 'name', text: w[1] }),
+      h('div', { class: 'track', role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(x.pct)), 'aria-label': w[1] + ', ' + pctText, title: x.resetsAt ? 'Resets ' + new Date(Date.parse(x.resetsAt)).toLocaleString() : '' },
+        h('div', { class: 'fill', style: 'width:' + Math.max(0, Math.min(100, x.pct)) + '%' })),
+      h('span', { class: 'fig' }, pctText, state ? h('span', { class: 'state', text: state }) : null, h('small', { text: x.resetsAt ? fmtUntil(x.resetsAt) : '' }))));
+  });
+  $('meterlist').replaceChildren.apply($('meterlist'), items);
 }
 function fetchFeed(cfg) {
   var p;
@@ -1390,7 +1462,7 @@ function fetchFeed(cfg) {
 }
 function setLiveCfg(cfg) {
   if (liveSame(cfg, live.cfg)) return;
-  live.cfg = cfg; live.seq++; live.busy = false; live.pcs = []; live.sessions = []; live.at = 0; live.lastEvent = ''; live.status = cfg ? 'loading' : ''; live.error = '';
+  live.cfg = cfg; live.seq++; live.busy = false; live.pcs = []; live.sessions = []; live.account = null; live.at = 0; live.lastEvent = ''; live.status = cfg ? 'loading' : ''; live.error = '';
   if (live.timer) { clearInterval(live.timer); live.timer = 0; }
   syncLiveForm();
   if (cfg) {
@@ -1407,7 +1479,7 @@ function fetchLive() {
   if (!live.at) { live.status = 'loading'; renderLiveNote(); }
   fetchFeed(cfg).then(function (p) {
     if (seq !== live.seq) return;
-    live.pcs = p.pcs; live.sessions = p.sessions; live.lastEvent = p.lastEvent; live.at = Date.now(); live.status = 'ok'; live.error = '';
+    live.pcs = p.pcs; live.sessions = p.sessions; live.account = p.account; live.lastEvent = p.lastEvent; live.at = Date.now(); live.status = 'ok'; live.error = '';
     rebuildLive();
   }, function (e) {
     if (seq !== live.seq) return;
@@ -1509,7 +1581,7 @@ function liveDisconnect() {
 /* ---------- wiring ---------- */
 function renderAll() {
   renderSelect(); renderHeader(); renderSummary(); renderModels();
-  renderToggles(); renderChart(); renderMatrix(); renderPCs(); renderSessions(); renderLiveNote();
+  renderToggles(); renderChart(); renderMatrix(); renderPCs(); renderSessions(); renderLiveNote(); renderLimits();
 }
 
 $('pcsel').addEventListener('change', function (e) { state.pc = e.target.value; state.sel = null; renderHeader(); renderSummary(); renderModels(); renderChart(); renderMatrix(); });
