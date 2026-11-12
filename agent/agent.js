@@ -8,6 +8,9 @@
    Counting follows ccusage (one API response = one record, the streamed chunk with the largest usage wins,
    fast-mode requests are priced as <model>-fast), plus Claude Code's own per-session ledger (the cost-state
    records), which also counts the subagent output tokens the per-message records understate.
+   It also reads, from Claude Code's own claude.ai login on this PC, how much of the subscription's rate limits the
+   whole account has used (the 5-hour and weekly windows, the same figures Claude Code's /usage shows) and sends
+   only those percentages to the collector. USAGE_LIMITS=0 switches that off.
    Tools offered to Claude: usage_sync_now, usage_status, usage_summary.
    Also runs by hand: node agent.js --once (scan, send, print a summary), --once --everything, --status, --summary.
    Node 18+, no dependencies. Everything on stdout is MCP; logs go to stderr. */
@@ -16,7 +19,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 const env = process.env;
 const URL_BASE = (env.USAGE_URL || '').trim().replace(/\/+$/, '');
 const KEY = (env.USAGE_KEY || '').trim();
@@ -34,6 +37,9 @@ const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const INTERVAL = Math.max(10000, Number(env.USAGE_INTERVAL_MS) || 60000);
 const TZ_OVERRIDE = (env.USAGE_TZ || '').trim();
 const USE_LEDGER = env.USAGE_LEDGER !== '0';
+const LIMITS_ON = env.USAGE_LIMITS !== '0';
+const LIMITS_URL = (env.USAGE_LIMITS_URL || 'https://api.anthropic.com/api/oauth/usage').trim();
+const LIMITS_EVERY = Math.max(60000, Number(env.USAGE_LIMITS_INTERVAL_MS) || 5 * 60000);
 const MAX_SESSIONS = 1000, TAIL = 16, MIN_DATE = '2024-01-01', FREEZE_AFTER_DAYS = 2;
 
 function safeUser() { try { return os.userInfo().username; } catch (e) { return 'unknown'; } }
@@ -402,10 +408,98 @@ function cycle(force, reason) {
     try {
       let s = scan(reason), r = await sync(force);
       if (state.retract) { s = scan('zone'); r = await sync(force); } /* the reply changed the zone: recount and send again now */
-      return { scan: s, sync: r };
+      const l = await syncLimits(force);
+      return { scan: s, sync: r, limits: l };
     } finally { busy = null; }
   })();
   return busy;
+}
+
+/* ---------- the account's rate-limit meter ---------- */
+const limitsState = { at: 0, sentAt: 0, windows: null, plan: '', error: '', lastLogged: '' };
+/* Claude Code's claude.ai login: the credentials file beside each log root (Windows, Linux), else the macOS keychain.
+   The token is used for one request and never stored, logged or sent anywhere but Anthropic. */
+function readLogin() {
+  const parse = (text) => {
+    const j = JSON.parse(text), o = j && j.claudeAiOauth;
+    if (!o || typeof o.accessToken !== 'string' || !o.accessToken) return null;
+    let exp = Number(o.expiresAt);
+    if (!Number.isFinite(exp) || exp <= 0) exp = 0; else if (exp < 1e12) exp *= 1000;
+    return { token: o.accessToken, expiresAt: exp, plan: typeof o.subscriptionType === 'string' ? o.subscriptionType.slice(0, 40) : '' };
+  };
+  for (const root of CLAUDE_ROOTS) {
+    const dir = path.basename(root) === 'projects' ? path.dirname(root) : root;
+    try { const c = parse(fs.readFileSync(path.join(dir, '.credentials.json'), 'utf8')); if (c) return c; } catch (e) {}
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const out = require('child_process').execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const c = parse(out.trim()); if (c) return c;
+    } catch (e) {}
+  }
+  return null;
+}
+const WINDOW_NAMES = { five_hour: 'fiveHour', seven_day: 'sevenDay', seven_day_opus: 'sevenDayOpus', seven_day_sonnet: 'sevenDaySonnet' };
+function parseWindows(j) {
+  const out = {};
+  const take = (src) => {
+    if (!src || typeof src !== 'object') return;
+    Object.keys(WINDOW_NAMES).forEach((k) => {
+      const w = src[k];
+      if (!w || typeof w !== 'object') return;
+      const u = Number(w.utilization);
+      if (!Number.isFinite(u)) return;
+      const ra = w.resets_at !== undefined ? w.resets_at : w.resetsAt;
+      let resetsAt = '';
+      if (typeof ra === 'number' && Number.isFinite(ra) && ra > 0) resetsAt = new Date(ra < 1e12 ? ra * 1000 : ra).toISOString();
+      else if (typeof ra === 'string' && Number.isFinite(Date.parse(ra))) resetsAt = new Date(Date.parse(ra)).toISOString();
+      out[WINDOW_NAMES[k]] = { pct: Math.max(0, Math.min(100, Math.round(u * 10) / 10)), resetsAt };
+    });
+  };
+  take(j);
+  take(j && j.unifiedWindows); /* the newer form wins when both are present */
+  return out;
+}
+async function readLimits() {
+  const login = readLogin();
+  if (!login) return { error: 'no claude.ai login found in Claude Code on this PC' };
+  if (login.expiresAt && login.expiresAt < Date.now()) return { error: 'the login token has expired; Claude Code renews it the next time it is used' };
+  let r;
+  try {
+    r = await fetch(LIMITS_URL, { headers: { authorization: 'Bearer ' + login.token, 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json', 'user-agent': 'claude-usage-agent/' + VERSION, connection: 'close' }, signal: AbortSignal.timeout(15000) });
+  } catch (e) { return { error: 'could not reach the usage endpoint: ' + (e && e.message ? e.message : e) }; }
+  if (r.status === 401 || r.status === 403) return { error: 'the usage endpoint refused the login (' + r.status + ')' };
+  if (!r.ok) return { error: 'the usage endpoint answered ' + r.status };
+  let j;
+  try { j = await r.json(); } catch (e) { return { error: 'the usage endpoint did not answer with JSON' }; }
+  const windows = parseWindows(j);
+  if (!Object.keys(windows).length) return { error: 'the usage reply had no rate-limit windows' };
+  return { plan: login.plan, windows };
+}
+function limitsLog(msg) { if (msg !== limitsState.lastLogged) { log(msg); limitsState.lastLogged = msg; } }
+/* read and send, at most every LIMITS_EVERY; force skips the wait */
+async function syncLimits(force) {
+  if (!LIMITS_ON || !URL_BASE || !KEY) return { skipped: true };
+  if (!force && Date.now() - limitsState.at < LIMITS_EVERY) return { skipped: true };
+  limitsState.at = Date.now();
+  const r = await readLimits();
+  if (r.error) { limitsState.error = r.error; limitsLog('account limits: ' + r.error); return { error: r.error }; }
+  limitsState.windows = r.windows; limitsState.plan = r.plan; limitsState.error = '';
+  try {
+    const sent = await fetchJSON(URL_BASE + '/v1/limits', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': KEY }, body: JSON.stringify({ member: { id: MEMBER_ID, token: state.token }, limits: { plan: r.plan, checkedAt: new Date().toISOString(), windows: r.windows } }) }, 20000);
+    if (!sent.ok) throw new Error('the collector answered ' + sent.status + (sent.json && sent.json.error ? ': ' + sent.json.error : ''));
+    limitsState.sentAt = Date.now();
+    limitsLog('account limits: ' + Object.keys(r.windows).map((k) => k + ' ' + r.windows[k].pct + '%').join(', '));
+    return { sent: true, windows: r.windows, plan: r.plan };
+  } catch (e) { limitsState.error = e.message; limitsLog('account limits: ' + e.message); return { error: e.message }; }
+}
+function limitsText() {
+  if (!LIMITS_ON) return 'Account limits: off (USAGE_LIMITS=0).';
+  if (limitsState.windows) {
+    const names = { fiveHour: '5-hour window', sevenDay: 'weekly', sevenDayOpus: 'weekly Opus', sevenDaySonnet: 'weekly Sonnet' };
+    return 'Account limits' + (limitsState.plan ? ' (' + limitsState.plan + ' plan)' : '') + ': ' + Object.keys(limitsState.windows).map((k) => names[k] + ' ' + limitsState.windows[k].pct + '% used' + (limitsState.windows[k].resetsAt ? ', resets ' + when(limitsState.windows[k].resetsAt) : '')).join('; ') + '.' + (limitsState.error ? ' Last send: ' + limitsState.error : '');
+  }
+  return 'Account limits: ' + (limitsState.error || 'not read yet') + '.';
 }
 
 /* ---------- tools ---------- */
@@ -418,8 +512,9 @@ function fmtInt(n) { return Math.round(n).toLocaleString('en-US'); }
 function fmtUsd(v) { return v >= 100 ? '$' + Math.round(v).toLocaleString('en-US') : '$' + v.toFixed(2); }
 function when(iso) { return iso ? iso.replace('T', ' ').slice(0, 16) + ' UTC' : 'never'; }
 function describe(r) {
-  if (!r.sync.sent) return 'Scanned ' + r.scan.files + ' log files (' + r.scan.records + ' new API calls). Not sent: ' + String(r.sync.error || 'nothing new').replace(/\.$/, '') + '.';
-  return 'Scanned ' + r.scan.files + ' log files, ' + r.scan.records + ' new API calls. Sent ' + r.sync.days + ' day-and-model rows and ' + r.sync.sessions + ' sessions' + (r.sync.full ? ' (everything this PC has)' : '') + ' to ' + URL_BASE + ' as “' + LABEL + '”.';
+  const lim = r.limits && r.limits.sent ? ' Account limits sent too.' : (r.limits && r.limits.error ? ' Account limits not sent: ' + r.limits.error + '.' : '');
+  if (!r.sync.sent) return 'Scanned ' + r.scan.files + ' log files (' + r.scan.records + ' new API calls). Not sent: ' + String(r.sync.error || 'nothing new').replace(/\.$/, '') + '.' + lim;
+  return 'Scanned ' + r.scan.files + ' log files, ' + r.scan.records + ' new API calls. Sent ' + r.sync.days + ' day-and-model rows and ' + r.sync.sessions + ' sessions' + (r.sync.full ? ' (everything this PC has)' : '') + ' to ' + URL_BASE + ' as \u201C' + LABEL + '\u201D.' + lim;
 }
 async function toolSyncNow(args) { return describe(await cycle(!!(args && args.everything), 'tool')); }
 function toolStatus() {
@@ -429,6 +524,7 @@ function toolStatus() {
     'Day boundaries: ' + (state.tz || 'this PC’s time zone') + '.',
     'Last scan ' + when(state.lastScan) + '; last successful send ' + when(state.lastSyncOk) + '; ' + (pend ? pend + ' day(s) waiting to be sent' : 'nothing waiting') + '.',
     state.lastError ? 'Last error: ' + state.lastError + (state.nextTry > Date.now() ? ' (next try in ' + Math.ceil((state.nextTry - Date.now()) / 60000) + ' min)' : '') : 'No errors.',
+    limitsText(),
     'Agent ' + VERSION + ' on Node ' + process.version + '.'].join('\n');
 }
 async function toolSummary(args) {
@@ -459,6 +555,12 @@ async function toolSummary(args) {
   if (scope === 'all') { lines.push('By PC:'); byPc.forEach((t) => lines.push('  ' + t.label + ': ' + fmtUsd(t.cost) + ', ' + fmtInt(t.out) + ' output tokens, ' + t.days.size + ' active day' + (t.days.size === 1 ? '' : 's'))); }
   lines.push('By model:');
   Array.from(byModel.entries()).sort((a, b) => b[1].cost - a[1].cost).forEach(([m, v]) => lines.push('  ' + m + ': ' + fmtUsd(v.cost) + ', ' + fmtInt(v.out) + ' output tokens'));
+  const acc = r.json.account;
+  if (acc && acc.windows && typeof acc.windows === 'object') {
+    const names = { fiveHour: '5-hour window', sevenDay: 'weekly', sevenDayOpus: 'weekly Opus', sevenDaySonnet: 'weekly Sonnet' };
+    const parts = Object.keys(names).filter((k) => acc.windows[k] && typeof acc.windows[k].pct === 'number').map((k) => names[k] + ' ' + acc.windows[k].pct + '% used' + (acc.windows[k].resetsAt ? ' (resets ' + when(acc.windows[k].resetsAt) + ')' : ''));
+    if (parts.length) lines.push('Account limits' + (acc.plan ? ', ' + acc.plan + ' plan' : '') + ', for the whole account including claude.ai chats: ' + parts.join('; ') + '. Checked ' + when(acc.checkedAt) + (acc.byLabel ? ' on ' + acc.byLabel : '') + '.');
+  }
   if (r.json.stats && r.json.stats.lastEvent) lines.push('Last usage received by the collector: ' + when(r.json.stats.lastEvent) + '.');
   return lines.join('\n');
 }
@@ -563,8 +665,9 @@ async function main() {
     return;
   }
   if (argv.indexOf('--summary') >= 0) { console.log(await toolSummary({ days: 7 })); return; }
+  if (argv.indexOf('--limits') >= 0) { const r = await syncLimits(true); console.log((r.sent ? 'Sent to the collector. ' : (r.error ? 'Not sent: ' + r.error + '. ' : '')) + limitsText()); process.exitCode = r.sent ? 0 : 1; return; }
   if (!URL_BASE || !KEY) log('USAGE_URL or USAGE_KEY is not set: usage is counted but cannot be sent');
   serve();
 }
 if (require.main === module) main().catch((e) => { log('fatal:', e && e.stack || e); process.exitCode = 1; });
-module.exports = { parseLine, parseLedger, readFrom, dayOf, slug, systemString, TOOLS, VERSION };
+module.exports = { parseLine, parseLedger, parseWindows, readFrom, dayOf, slug, systemString, TOOLS, VERSION };

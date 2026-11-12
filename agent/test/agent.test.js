@@ -480,3 +480,98 @@ test('as an MCP server without a reachable collector: tools still answer, nothin
     assert.equal(ex.code, 0);
   } finally { if (!H.gone(a.proc)) a.proc.kill(); }
 });
+
+/* a stand-in for Anthropic's usage endpoint: checks the login header and answers with the two reply shapes */
+function fakeUsageEndpoint(opts) {
+  const http = require('http');
+  const o = Object.assign({ token: 'tok-login', status: 200 }, opts || {});
+  const calls = [];
+  const srv = http.createServer((req, res) => {
+    calls.push({ url: req.url, auth: req.headers.authorization, beta: req.headers['anthropic-beta'] });
+    if (req.headers.authorization !== 'Bearer ' + o.token) { res.writeHead(401, { 'content-type': 'application/json' }); return res.end('{"error":"unauthorized"}'); }
+    if (o.status !== 200) { res.writeHead(o.status); return res.end('{}'); }
+    const soon = new Date(Date.now() + 2 * 3600e3).toISOString();
+    const body = o.unified
+      ? { unifiedWindows: { five_hour: { utilization: 42.44, resetsAt: Math.floor(Date.now() / 1000) + 7200, status: 'allowed' }, seven_day: { utilization: 91, resetsAt: Date.now() + 3 * 86400e3 } }, five_hour: { utilization: 1, resets_at: soon } }
+      : { five_hour: { utilization: 42.44, resets_at: soon }, seven_day: { utilization: 91, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() }, seven_day_opus: { utilization: 12, resets_at: soon }, seven_day_oauth_apps: null, extra_usage: {} };
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body));
+  });
+  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({ url: 'http://127.0.0.1:' + srv.address().port + '/api/oauth/usage', calls, close: () => new Promise((r) => srv.close(r)) })));
+}
+/* run the agent without blocking this process (the stand-in endpoint must keep serving) */
+function runAgent(args, envVars) {
+  return new Promise((resolve) => {
+    const proc = spawn(process.execPath, [AGENT].concat(args), { env: envVars, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d; }); proc.stderr.on('data', (d) => { stderr += d; });
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 60000);
+    proc.on('exit', (code) => { clearTimeout(timer); resolve({ status: code, stdout, stderr }); });
+  });
+}
+function writeLogin(dir, o) { fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: Object.assign({ accessToken: 'tok-login', refreshToken: 'tok-refresh', expiresAt: Date.now() + 3600e3, scopes: ['user:inference'], subscriptionType: 'max' }, o || {}) })); }
+
+test('parseWindows reads both reply shapes and clamps', () => {
+  const soon = '2026-11-13T10:00:00.000Z';
+  assert.deepEqual(A.parseWindows({ five_hour: { utilization: 42.44, resets_at: soon }, seven_day: { utilization: '150' }, seven_day_sonnet: { utilization: -3, resets_at: 'never' }, seven_day_opus: null, junk: { utilization: 5 } }),
+    { fiveHour: { pct: 42.4, resetsAt: soon }, sevenDay: { pct: 100, resetsAt: '' }, sevenDaySonnet: { pct: 0, resetsAt: '' } });
+  const u = A.parseWindows({ five_hour: { utilization: 1, resets_at: soon }, unifiedWindows: { five_hour: { utilization: 60, resetsAt: 1794000000 }, seven_day: { utilization: 20, resetsAt: 1794000000000 } } });
+  assert.equal(u.fiveHour.pct, 60); assert.equal(u.fiveHour.resetsAt, new Date(1794000000000).toISOString()); assert.equal(u.sevenDay.resetsAt, new Date(1794000000000).toISOString());
+  assert.deepEqual(A.parseWindows(null), {}); assert.deepEqual(A.parseWindows({ five_hour: { utilization: 'x' } }), {});
+});
+
+test('the account limits are read from the login and sent; the token stays on the PC', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const ep = await fakeUsageEndpoint();
+  const fx = fixture(), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  writeLogin(fx.dir);
+  const envL = (extra) => env(col, Object.assign({ USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st, USAGE_LIMITS_URL: ep.url }, extra || {}));
+  let ep2 = null;
+  try {
+    let r = await runAgent(['--once'], envL());
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /Account limits sent too\.$/m);
+    assert.equal(ep.calls.length, 1); assert.equal(ep.calls[0].beta, 'oauth-2025-04-20'); assert.equal(ep.calls[0].url, '/api/oauth/usage');
+    const u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u.account.plan, 'max'); assert.equal(u.account.windows.fiveHour.pct, 42.4); assert.equal(u.account.windows.sevenDay.pct, 91); assert.equal(u.account.windows.sevenDayOpus.pct, 12);
+    assert.equal(u.account.byLabel, 'Harsh Patel · DESKTOP-1');
+    const everything = r.stdout + r.stderr + fs.readFileSync(path.join(st, 'state.json'), 'utf8');
+    assert.ok(everything.indexOf('tok-login') < 0 && everything.indexOf('tok-refresh') < 0, 'no token in output or state');
+    /* status and the summary tool mention it */
+    const status = await runAgent(['--status'], envL());
+    assert.match(status.stdout, /Account limits: not read yet\./, 'a fresh process has not read them');
+    const lim = await runAgent(['--limits'], envL());
+    assert.equal(lim.status, 0, lim.stdout + lim.stderr); assert.match(lim.stdout, /^Sent to the collector\. Account limits \(max plan\): 5-hour window 42\.4% used, resets .*; weekly 91% used/);
+    const sum = await runAgent(['--summary'], envL());
+    assert.match(sum.stdout, /Account limits, max plan, for the whole account including claude.ai chats: 5-hour window 42\.4% used \(resets .*\); weekly 91% used/);
+    /* the newer reply shape */
+    ep2 = await fakeUsageEndpoint({ unified: true });
+    r = await runAgent(['--limits'], envL({ USAGE_LIMITS_URL: ep2.url }));
+    assert.equal(r.status, 0, r.stdout);
+    const u2 = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u2.account.windows.fiveHour.pct, 42.4); assert.equal(u2.account.windows.sevenDay.pct, 91); assert.equal(u2.account.windows.sevenDayOpus, undefined);
+  } finally { await ep.close(); if (ep2) await ep2.close(); await col.stop(); }
+});
+
+test('limits are skipped cleanly: no login, expired login, refused login, switched off', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const ep = await fakeUsageEndpoint();
+  const fx = fixture(), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  const envL = (extra) => env(col, Object.assign({ USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st, USAGE_LIMITS_URL: ep.url }, extra || {}));
+  try {
+    let r = await runAgent(['--once'], envL());
+    assert.equal(r.status, 0); assert.match(r.stdout, /Account limits not sent: no claude.ai login found in Claude Code on this PC\./);
+    writeLogin(fx.dir, { expiresAt: Date.now() - 1000 });
+    r = await runAgent(['--once'], envL());
+    assert.equal(r.status, 0); assert.match(r.stdout, /Account limits not sent: the login token has expired/); assert.equal(ep.calls.length, 0);
+    writeLogin(fx.dir, { expiresAt: Math.floor(Date.now() / 1000) + 3600 }); /* seconds, as some writers use */
+    r = await runAgent(['--once'], envL());
+    assert.match(r.stdout, /Account limits sent too\./); assert.equal(ep.calls.length, 1);
+    writeLogin(fx.dir, { accessToken: 'tok-wrong' });
+    r = await runAgent(['--once'], envL());
+    assert.equal(r.status, 0); assert.match(r.stdout, /Account limits not sent: the usage endpoint refused the login \(401\)/);
+    r = await runAgent(['--once'], envL({ USAGE_LIMITS: '0' }));
+    assert.equal(r.status, 0); assert.ok(!/Account limits/.test(r.stdout), r.stdout);
+    assert.equal(ep.calls.length, 2);
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.account.windows.fiveHour.pct, 42.4, 'the good reading stays');
+  } finally { await ep.close(); await col.stop(); }
+});
