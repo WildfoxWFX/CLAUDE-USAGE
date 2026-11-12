@@ -8,18 +8,21 @@
    Counting follows ccusage (one API response = one record, the streamed chunk with the largest usage wins,
    fast-mode requests are priced as <model>-fast), plus Claude Code's own per-session ledger (the cost-state
    records), which also counts the subagent output tokens the per-message records understate.
-   It also reads, from Claude Code's own claude.ai login on this PC, how much of the subscription's rate limits the
-   whole account has used (the 5-hour and weekly windows, the same figures Claude Code's /usage shows) and sends
-   only those percentages to the collector. USAGE_LIMITS=0 switches that off.
+   It also forwards the account's rate-limit usage (the 5-hour and weekly windows, as percentages) that Claude Code
+   hands to its status line after every reply: `node agent.js --setup` registers `node agent.js --statusline` as the
+   status line (keeping any status line that was there, which it keeps running), the status line saves the figures
+   to a file, and the agent sends them to the collector. No login token is read and no undocumented endpoint is
+   called. USAGE_LIMITS=0 switches the forwarding off.
    Tools offered to Claude: usage_sync_now, usage_status, usage_summary.
-   Also runs by hand: node agent.js --once (scan, send, print a summary), --once --everything, --status, --summary.
+   Also runs by hand: node agent.js --once (scan, send, print a summary), --once --everything, --status, --summary,
+   --limits (send the last status-line reading), --setup (register the status line).
    Node 18+, no dependencies. Everything on stdout is MCP; logs go to stderr. */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const env = process.env;
 const URL_BASE = (env.USAGE_URL || '').trim().replace(/\/+$/, '');
 const KEY = (env.USAGE_KEY || '').trim();
@@ -38,8 +41,9 @@ const INTERVAL = Math.max(10000, Number(env.USAGE_INTERVAL_MS) || 60000);
 const TZ_OVERRIDE = (env.USAGE_TZ || '').trim();
 const USE_LEDGER = env.USAGE_LEDGER !== '0';
 const LIMITS_ON = env.USAGE_LIMITS !== '0';
-const LIMITS_URL = (env.USAGE_LIMITS_URL || 'https://api.anthropic.com/api/oauth/usage').trim();
-const LIMITS_EVERY = Math.max(60000, Number(env.USAGE_LIMITS_INTERVAL_MS) || 5 * 60000);
+const LIMITS_FILE = path.join(STATE_DIR, 'limits.json'); /* written by the status line, read by the agent */
+const PREV_STATUSLINE_FILE = path.join(STATE_DIR, 'statusline.json'); /* the status line that was there before --setup */
+const LIMITS_EVERY = Math.max(10000, Number(env.USAGE_LIMITS_INTERVAL_MS) || 60000);
 const MAX_SESSIONS = 1000, TAIL = 16, MIN_DATE = '2024-01-01', FREEZE_AFTER_DAYS = 2;
 
 function safeUser() { try { return os.userInfo().username; } catch (e) { return 'unknown'; } }
@@ -61,7 +65,7 @@ function daysAgo(n, zone) { return dayOf(Date.now() - n * 86400000, zone); }
 
 /* ---------- state ---------- */
 function emptyState() {
-  return { v: 2, url: URL_BASE, member: MEMBER_ID, token: '', tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, frozenDays: [], retract: null, zeroRows: [],
+  return { v: 2, url: URL_BASE, member: MEMBER_ID, token: '', tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, frozenDays: [], retract: null, zeroRows: [], limitsSentFor: '',
     dirtyDays: [], dirtySessions: [], full: true, lastActivity: '', lastScan: '', lastSync: '', lastSyncOk: '', lastError: '', fails: 0, nextTry: 0, sent: 0 };
 }
 let state = emptyState();
@@ -415,91 +419,130 @@ function cycle(force, reason) {
   return busy;
 }
 
-/* ---------- the account's rate-limit meter ---------- */
-const limitsState = { at: 0, sentAt: 0, windows: null, plan: '', error: '', lastLogged: '' };
-/* Claude Code's claude.ai login: the credentials file beside each log root (Windows, Linux), else the macOS keychain.
-   The token is used for one request and never stored, logged or sent anywhere but Anthropic. */
-function readLogin() {
-  const parse = (text) => {
-    const j = JSON.parse(text), o = j && j.claudeAiOauth;
-    if (!o || typeof o.accessToken !== 'string' || !o.accessToken) return null;
-    let exp = Number(o.expiresAt);
-    if (!Number.isFinite(exp) || exp <= 0) exp = 0; else if (exp < 1e12) exp *= 1000;
-    return { token: o.accessToken, expiresAt: exp, plan: typeof o.subscriptionType === 'string' ? o.subscriptionType.slice(0, 40) : '' };
-  };
-  for (const root of CLAUDE_ROOTS) {
-    const dir = path.basename(root) === 'projects' ? path.dirname(root) : root;
-    try { const c = parse(fs.readFileSync(path.join(dir, '.credentials.json'), 'utf8')); if (c) return c; } catch (e) {}
+/* ---------- the account's rate-limit meter, from Claude Code's status line ---------- */
+/* Claude Code pipes a JSON document to its status-line command after each reply; for a claude.ai subscription it
+   includes rate_limits.five_hour / seven_day with used_percentage (0-100) and resets_at (epoch seconds). */
+const limitsState = { at: 0, windows: null, error: '', lastLogged: '' }; /* which reading was sent last lives in the state file */
+function writeAtomic(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+}
+function parseStatusWindows(rl) {
+  if (!rl || typeof rl !== 'object') return null;
+  const names = { five_hour: 'fiveHour', seven_day: 'sevenDay', seven_day_opus: 'sevenDayOpus', seven_day_sonnet: 'sevenDaySonnet' };
+  const out = {};
+  Object.keys(names).forEach((k) => {
+    const w = rl[k];
+    if (!w || typeof w !== 'object') return;
+    const u = Number(w.used_percentage !== undefined ? w.used_percentage : w.utilization);
+    if (!Number.isFinite(u)) return;
+    const ra = w.resets_at !== undefined ? w.resets_at : w.resetsAt;
+    let resetsAt = '';
+    if (typeof ra === 'number' && Number.isFinite(ra) && ra > 0) resetsAt = new Date(ra < 1e12 ? ra * 1000 : ra).toISOString();
+    else if (typeof ra === 'string' && Number.isFinite(Date.parse(ra))) resetsAt = new Date(Date.parse(ra)).toISOString();
+    out[names[k]] = { pct: Math.max(0, Math.min(100, Math.round(u * 10) / 10)), resetsAt };
+  });
+  return Object.keys(out).length ? out : null;
+}
+function readStdin() {
+  return new Promise((resolve) => {
+    let text = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => { text += c; });
+    process.stdin.on('end', () => resolve(text));
+    process.stdin.on('error', () => resolve(text));
+    setTimeout(() => resolve(text), 3000).unref();
+  });
+}
+function readPrevStatusLine() {
+  try { const j = JSON.parse(fs.readFileSync(PREV_STATUSLINE_FILE, 'utf8')); return j && typeof j.command === 'string' && j.command.trim() ? j.command : ''; } catch (e) { return ''; }
+}
+function shortReset(iso) {
+  const ms = Date.parse(iso) - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  const m = Math.round(ms / 60000), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  return d ? d + 'd ' + h + 'h' : (h ? h + 'h ' + mm + 'm' : mm + 'm');
+}
+/* the status line itself: save the figures, then show the previous status line's output, or a short line of our own */
+async function statusLine() {
+  const text = await readStdin();
+  let j = null;
+  try { j = JSON.parse(text); } catch (e) {}
+  const windows = j ? parseStatusWindows(j.rate_limits) : null;
+  if (windows) { try { writeAtomic(LIMITS_FILE, JSON.stringify({ at: new Date().toISOString(), windows, model: j.model && typeof j.model.display_name === 'string' ? j.model.display_name.slice(0, 40) : '' })); } catch (e) {} }
+  const prev = readPrevStatusLine();
+  if (prev) {
+    const { spawn } = require('child_process');
+    const child = spawn(prev, { shell: true, stdio: ['pipe', 'inherit', 'inherit'], env: process.env });
+    child.on('error', () => { process.exitCode = 0; });
+    child.on('exit', (code) => { process.exitCode = code || 0; });
+    child.stdin.on('error', () => {});
+    child.stdin.end(text);
+    return;
   }
-  if (process.platform === 'darwin') {
-    try {
-      const out = require('child_process').execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
-      const c = parse(out.trim()); if (c) return c;
-    } catch (e) {}
+  if (!windows) return; /* nothing to say yet */
+  const parts = [];
+  if (windows.fiveHour) parts.push('5h ' + Math.round(windows.fiveHour.pct) + '%' + (windows.fiveHour.resetsAt ? ' (' + shortReset(windows.fiveHour.resetsAt) + ')' : ''));
+  if (windows.sevenDay) parts.push('week ' + Math.round(windows.sevenDay.pct) + '%' + (windows.sevenDay.resetsAt ? ' (' + shortReset(windows.sevenDay.resetsAt) + ')' : ''));
+  process.stdout.write('Claude limits: ' + parts.join(' · ') + '\n');
+}
+/* register the status line in the user-level settings file, keeping whatever other settings and status line exist */
+function settingsFile() {
+  const root = CLAUDE_ROOTS[0];
+  return path.join(path.basename(root) === 'projects' ? path.dirname(root) : root, 'settings.json');
+}
+function ourStatusCommand() { return 'node "' + __filename + '" --statusline'; }
+function setupStatusLine() {
+  const file = settingsFile();
+  let s = {};
+  try { s = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')); } catch (e) { if (e.code !== 'ENOENT') throw new Error('could not read ' + file + ': ' + e.message); }
+  if (!s || typeof s !== 'object' || Array.isArray(s)) s = {};
+  const cur = s.statusLine, ours = ourStatusCommand();
+  let kept = '';
+  if (cur && typeof cur === 'object' && cur.type === 'command' && typeof cur.command === 'string' && cur.command.trim() && cur.command.indexOf('--statusline') < 0) {
+    kept = cur.command;
+    writeAtomic(PREV_STATUSLINE_FILE, JSON.stringify({ command: kept, savedAt: new Date().toISOString() }));
   }
+  const next = { type: 'command', command: ours };
+  if (cur && typeof cur === 'object' && cur.padding !== undefined) next.padding = cur.padding;
+  s.statusLine = next;
+  writeAtomic(file, JSON.stringify(s, null, 2) + '\n');
+  return { file, kept, previous: readPrevStatusLine() };
+}
+function readLimitsFile() {
+  try {
+    const j = JSON.parse(fs.readFileSync(LIMITS_FILE, 'utf8'));
+    if (j && j.windows && typeof j.windows === 'object' && typeof j.at === 'string' && Number.isFinite(Date.parse(j.at))) return j;
+  } catch (e) {}
   return null;
 }
-const WINDOW_NAMES = { five_hour: 'fiveHour', seven_day: 'sevenDay', seven_day_opus: 'sevenDayOpus', seven_day_sonnet: 'sevenDaySonnet' };
-function parseWindows(j) {
-  const out = {};
-  const take = (src) => {
-    if (!src || typeof src !== 'object') return;
-    Object.keys(WINDOW_NAMES).forEach((k) => {
-      const w = src[k];
-      if (!w || typeof w !== 'object') return;
-      const u = Number(w.utilization);
-      if (!Number.isFinite(u)) return;
-      const ra = w.resets_at !== undefined ? w.resets_at : w.resetsAt;
-      let resetsAt = '';
-      if (typeof ra === 'number' && Number.isFinite(ra) && ra > 0) resetsAt = new Date(ra < 1e12 ? ra * 1000 : ra).toISOString();
-      else if (typeof ra === 'string' && Number.isFinite(Date.parse(ra))) resetsAt = new Date(Date.parse(ra)).toISOString();
-      out[WINDOW_NAMES[k]] = { pct: Math.max(0, Math.min(100, Math.round(u * 10) / 10)), resetsAt };
-    });
-  };
-  take(j);
-  take(j && j.unifiedWindows); /* the newer form wins when both are present */
-  return out;
-}
-async function readLimits() {
-  const login = readLogin();
-  if (!login) return { error: 'no claude.ai login found in Claude Code on this PC' };
-  if (login.expiresAt && login.expiresAt < Date.now()) return { error: 'the login token has expired; Claude Code renews it the next time it is used' };
-  let r;
-  try {
-    r = await fetch(LIMITS_URL, { headers: { authorization: 'Bearer ' + login.token, 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json', 'user-agent': 'claude-usage-agent/' + VERSION, connection: 'close' }, signal: AbortSignal.timeout(15000) });
-  } catch (e) { return { error: 'could not reach the usage endpoint: ' + (e && e.message ? e.message : e) }; }
-  if (r.status === 401 || r.status === 403) return { error: 'the usage endpoint refused the login (' + r.status + ')' };
-  if (!r.ok) return { error: 'the usage endpoint answered ' + r.status };
-  let j;
-  try { j = await r.json(); } catch (e) { return { error: 'the usage endpoint did not answer with JSON' }; }
-  const windows = parseWindows(j);
-  if (!Object.keys(windows).length) return { error: 'the usage reply had no rate-limit windows' };
-  return { plan: login.plan, windows };
-}
 function limitsLog(msg) { if (msg !== limitsState.lastLogged) { log(msg); limitsState.lastLogged = msg; } }
-/* read and send, at most every LIMITS_EVERY; force skips the wait */
+/* send the status line's latest reading when it is new; force sends it again */
 async function syncLimits(force) {
   if (!LIMITS_ON || !URL_BASE || !KEY) return { skipped: true };
-  if (!force && Date.now() - limitsState.at < LIMITS_EVERY) return { skipped: true };
+  const f = readLimitsFile();
+  if (!f) { limitsState.error = 'no reading yet: Claude Code gives one to the status line after its first reply in a session (run node agent.js --setup once)'; return { error: limitsState.error }; }
+  limitsState.windows = f.windows; limitsState.readAt = f.at;
+  if (!force && (f.at === state.limitsSentFor || Date.now() - limitsState.at < LIMITS_EVERY)) return { skipped: true };
   limitsState.at = Date.now();
-  const r = await readLimits();
-  if (r.error) { limitsState.error = r.error; limitsLog('account limits: ' + r.error); return { error: r.error }; }
-  limitsState.windows = r.windows; limitsState.plan = r.plan; limitsState.error = '';
   try {
-    const sent = await fetchJSON(URL_BASE + '/v1/limits', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': KEY }, body: JSON.stringify({ member: { id: MEMBER_ID, token: state.token }, limits: { plan: r.plan, checkedAt: new Date().toISOString(), windows: r.windows } }) }, 20000);
+    const sent = await fetchJSON(URL_BASE + '/v1/limits', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': KEY }, body: JSON.stringify({ member: { id: MEMBER_ID, token: state.token }, limits: { plan: '', checkedAt: f.at, windows: f.windows } }) }, 20000);
     if (!sent.ok) throw new Error('the collector answered ' + sent.status + (sent.json && sent.json.error ? ': ' + sent.json.error : ''));
-    limitsState.sentAt = Date.now();
-    limitsLog('account limits: ' + Object.keys(r.windows).map((k) => k + ' ' + r.windows[k].pct + '%').join(', '));
-    return { sent: true, windows: r.windows, plan: r.plan };
+    state.limitsSentFor = f.at; limitsState.error = ''; saveState();
+    limitsLog('account limits: ' + Object.keys(f.windows).map((k) => k + ' ' + f.windows[k].pct + '%').join(', ') + ' (read ' + f.at + ')');
+    return { sent: true, windows: f.windows };
   } catch (e) { limitsState.error = e.message; limitsLog('account limits: ' + e.message); return { error: e.message }; }
 }
 function limitsText() {
   if (!LIMITS_ON) return 'Account limits: off (USAGE_LIMITS=0).';
-  if (limitsState.windows) {
+  const f = readLimitsFile();
+  if (f) {
     const names = { fiveHour: '5-hour window', sevenDay: 'weekly', sevenDayOpus: 'weekly Opus', sevenDaySonnet: 'weekly Sonnet' };
-    return 'Account limits' + (limitsState.plan ? ' (' + limitsState.plan + ' plan)' : '') + ': ' + Object.keys(limitsState.windows).map((k) => names[k] + ' ' + limitsState.windows[k].pct + '% used' + (limitsState.windows[k].resetsAt ? ', resets ' + when(limitsState.windows[k].resetsAt) : '')).join('; ') + '.' + (limitsState.error ? ' Last send: ' + limitsState.error : '');
+    return 'Account limits (from the status line, read ' + when(f.at) + '): ' + Object.keys(f.windows).map((k) => (names[k] || k) + ' ' + f.windows[k].pct + '% used' + (f.windows[k].resetsAt ? ', resets ' + when(f.windows[k].resetsAt) : '')).join('; ') + '.' + (limitsState.error ? ' Last send: ' + limitsState.error : '');
   }
-  return 'Account limits: ' + (limitsState.error || 'not read yet') + '.';
+  return 'Account limits: ' + (limitsState.error || 'no status-line reading yet (run node agent.js --setup once, then use Claude Code)') + '.';
 }
 
 /* ---------- tools ---------- */
@@ -512,7 +555,7 @@ function fmtInt(n) { return Math.round(n).toLocaleString('en-US'); }
 function fmtUsd(v) { return v >= 100 ? '$' + Math.round(v).toLocaleString('en-US') : '$' + v.toFixed(2); }
 function when(iso) { return iso ? iso.replace('T', ' ').slice(0, 16) + ' UTC' : 'never'; }
 function describe(r) {
-  const lim = r.limits && r.limits.sent ? ' Account limits sent too.' : (r.limits && r.limits.error ? ' Account limits not sent: ' + r.limits.error + '.' : '');
+  const lim = r.limits && r.limits.sent ? ' Account limits sent too.' : (r.limits && r.limits.error ? ' Account limits: ' + r.limits.error + '.' : '');
   if (!r.sync.sent) return 'Scanned ' + r.scan.files + ' log files (' + r.scan.records + ' new API calls). Not sent: ' + String(r.sync.error || 'nothing new').replace(/\.$/, '') + '.' + lim;
   return 'Scanned ' + r.scan.files + ' log files, ' + r.scan.records + ' new API calls. Sent ' + r.sync.days + ' day-and-model rows and ' + r.sync.sessions + ' sessions' + (r.sync.full ? ' (everything this PC has)' : '') + ' to ' + URL_BASE + ' as \u201C' + LABEL + '\u201D.' + lim;
 }
@@ -653,6 +696,7 @@ function serve() {
 /* ---------- main ---------- */
 async function main() {
   const argv = process.argv.slice(2);
+  if (argv.indexOf('--statusline') >= 0) { await statusLine(); return; } /* the status line must stay quick: no state, no network */
   loadState();
   if (argv.indexOf('--status') >= 0) { console.log(toolStatus()); return; }
   if (argv.indexOf('--once') >= 0) {
@@ -666,8 +710,13 @@ async function main() {
   }
   if (argv.indexOf('--summary') >= 0) { console.log(await toolSummary({ days: 7 })); return; }
   if (argv.indexOf('--limits') >= 0) { const r = await syncLimits(true); console.log((r.sent ? 'Sent to the collector. ' : (r.error ? 'Not sent: ' + r.error + '. ' : '')) + limitsText()); process.exitCode = r.sent ? 0 : 1; return; }
+  if (argv.indexOf('--setup') >= 0) {
+    const r = setupStatusLine();
+    console.log('Status line set in ' + r.file + ': ' + ourStatusCommand() + (r.previous ? ' (your previous status line, ' + r.previous + ', keeps running inside it)' : '') + '. Claude Code reads it when it starts.');
+    return;
+  }
   if (!URL_BASE || !KEY) log('USAGE_URL or USAGE_KEY is not set: usage is counted but cannot be sent');
   serve();
 }
 if (require.main === module) main().catch((e) => { log('fatal:', e && e.stack || e); process.exitCode = 1; });
-module.exports = { parseLine, parseLedger, parseWindows, readFrom, dayOf, slug, systemString, TOOLS, VERSION };
+module.exports = { parseLine, parseLedger, parseStatusWindows, readFrom, dayOf, slug, systemString, TOOLS, VERSION };

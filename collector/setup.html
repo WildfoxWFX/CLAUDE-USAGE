@@ -54,7 +54,7 @@ a { color: inherit; }
 
   <div id="out" hidden>
     <h2>Usage agent, Windows: paste into PowerShell on that PC</h2>
-    <p class="small">Needs Claude Code and Node.js (the LTS from nodejs.org) on the PC; the command says so if Node.js is missing. No administrator rights. It downloads the agent from this server into <code>%USERPROFILE%\.claude-usage</code> and registers it with <code>claude mcp add</code> for every project. Run it again any time to update.</p>
+    <p class="small">Needs Claude Code and Node.js (the LTS from nodejs.org) on the PC; the command says so if Node.js is missing. No administrator rights. It downloads the agent from this server into <code>%USERPROFILE%\.claude-usage</code>, registers it with <code>claude mcp add</code> for every project, and sets it as Claude Code&rsquo;s status line so the account&rsquo;s rate-limit usage reaches the dashboard too (a status line that is already there keeps running inside it). Run it again any time to update.</p>
     <div class="cmd"><pre><code id="aps"></code></pre><button type="button" class="btn ghost copy" data-for="aps">Copy</button></div>
 
     <h2>Usage agent, macOS or Linux: paste into Terminal on that PC</h2>
@@ -121,11 +121,11 @@ a { color: inherit; }
       "if($ok -and -not (Get-Command node -ErrorAction SilentlyContinue)){$ok=$false;'Node.js was not found. Install the LTS version from https://nodejs.org, open a NEW PowerShell window and paste again.'};" +
       "if($ok -and -not (Get-Command claude -ErrorAction SilentlyContinue)){$ok=$false;'The claude command was not found. Install Claude Code on this PC first, then paste again in a new window.'};" +
       "if($ok){claude mcp remove -s user claude-usage 2>$null|Out-Null;claude mcp add -s user claude-usage -e USAGE_URL=" + base + " -e USAGE_KEY=" + key + " -e USAGE_MEMBER=" + n + " -e \"USAGE_HOST=$h\" -- node $f;" +
-      "if($LASTEXITCODE -ne 0){'Registering the agent with claude mcp add failed; see the message above.'}else{$env:USAGE_URL='" + base + "';$env:USAGE_KEY='" + key + "';$env:USAGE_MEMBER='" + n + "';$env:USAGE_HOST=$h;node $f --once;" +
+      "if($LASTEXITCODE -ne 0){'Registering the agent with claude mcp add failed; see the message above.'}else{$env:USAGE_URL='" + base + "';$env:USAGE_KEY='" + key + "';$env:USAGE_MEMBER='" + n + "';$env:USAGE_HOST=$h;node $f --setup;node $f --once;" +
       "if($LASTEXITCODE -ne 0){'The agent is registered, but the first send failed; see the message above. Every new Claude Code session will try again.'}else{'Installed. Every new Claude Code session on this PC now reports its usage.'}}}";
     var ash = "d=\"$HOME/.claude-usage\"; h=\"$(hostname -s 2>/dev/null || hostname)\"; { command -v node >/dev/null || { echo 'Node.js was not found: install the LTS from https://nodejs.org and paste again.'; false; }; } && { command -v claude >/dev/null || { echo 'The claude command was not found: install Claude Code first.'; false; }; } && mkdir -p \"$d\" && curl -fsSL '" + base + "/agent.js' -o \"$d/agent.js\" && (claude mcp remove -s user claude-usage >/dev/null 2>&1 || true) && " +
       "claude mcp add -s user claude-usage -e USAGE_URL=" + base + " -e USAGE_KEY=" + key + " -e USAGE_MEMBER=" + n + " -e \"USAGE_HOST=$h\" -- node \"$d/agent.js\" && " +
-      "USAGE_URL=" + base + " USAGE_KEY=" + key + " USAGE_MEMBER=" + n + " USAGE_HOST=\"$h\" node \"$d/agent.js\" --once && echo 'Installed. Every new Claude Code session on this PC now reports its usage.'";
+      "USAGE_URL=" + base + " USAGE_KEY=" + key + " USAGE_MEMBER=" + n + " USAGE_HOST=\"$h\" node \"$d/agent.js\" --setup && USAGE_URL=" + base + " USAGE_KEY=" + key + " USAGE_MEMBER=" + n + " USAGE_HOST=\"$h\" node \"$d/agent.js\" --once && echo 'Installed. Every new Claude Code session on this PC now reports its usage.'";
     $('aps').textContent = aps;
     $('ash').textContent = ash;
     $('ps').textContent = ps;

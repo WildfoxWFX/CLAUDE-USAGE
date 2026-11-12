@@ -138,7 +138,7 @@ If it prints "Node.js was not found", install Node.js LTS from https://nodejs.or
 
 ## D. Using it
 
-- Dashboard: `ADDRESS/?key=READ_KEY`. Pick a PC in the filter, hover the daily chart, see the largest sessions. The "Account limits" meters at the top show how much of the subscription's 5-hour and weekly limits the whole account has used, chats on claude.ai included; they come from whichever PC last reported them.
+- Dashboard: `ADDRESS/?key=READ_KEY`. Pick a PC in the filter, hover the daily chart, see the largest sessions. The "Account limits" meters at the top show how much of the subscription's 5-hour and weekly limits the whole account has used, chats on claude.ai included; Claude Code hands them to its status line after each reply, and the agent forwards them from whichever PC last had a reply.
 - In Claude Code on any set-up PC, ask "how much did the team use Claude this week?" Claude calls `usage_summary` and answers with cost and tokens by PC and by model. "Is usage reporting working?" calls `usage_status`.
 - claude.ai artifact: in "Live usage from every PC", paste the address and `READ_KEY`, click Connect. Every device that opens the artifact then shows the same PCs.
 

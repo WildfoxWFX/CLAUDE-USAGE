@@ -52,7 +52,7 @@ Steps:
 4. Register it for every project (user scope). First run `claude mcp remove -s user claude-usage` and ignore an error saying it does not exist. Then run, with the real full path to agent.js and this PC's computer name as USAGE_HOST:
    claude mcp add -s user claude-usage -e USAGE_URL=<ADDRESS> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<NAME> -e USAGE_HOST=<this PC's name> -- node <full path to agent.js>
    The server name comes right after `add`, before the -e pairs; the CLI rejects the other order.
-5. Send this PC's history now: run `node <full path to agent.js> --once` with USAGE_URL, USAGE_KEY, USAGE_MEMBER and USAGE_HOST set in the environment to the same values. Show me its output; it should say how many log files it scanned and that it sent rows to the collector. If it says "Not sent", show me the error and stop.
+5. Register the agent as Claude Code's status line with `node <full path to agent.js> --setup` (it keeps any status line that is already configured). Then send this PC's history now: run `node <full path to agent.js> --once` with USAGE_URL, USAGE_KEY, USAGE_MEMBER and USAGE_HOST set in the environment to the same values. Show me its output; it should say how many log files it scanned and that it sent rows to the collector. If it says "Not sent", show me the error and stop.
 6. Confirm with `claude mcp get claude-usage` that the server is registered with those environment values.
 7. Tell me: the registration is done, the first sync result, and that I must close Claude Code and start it again so the new session loads the server; after that `/mcp` lists claude-usage, and asking "how much did the team use Claude this week?" calls its usage_summary tool.
 
@@ -66,7 +66,7 @@ Open the setup page the VPS printed (`/setup?key=READ_KEY`) in a browser on any 
 The command it writes, for reference (values in angle brackets come from the VPS; a name with spaces is written as `Harsh%20Patel`):
 
 ```
-$d=Join-Path $env:USERPROFILE '.claude-usage';New-Item -ItemType Directory -Force -Path $d|Out-Null;$f=Join-Path $d 'agent.js';$h=if($env:COMPUTERNAME){$env:COMPUTERNAME}else{[Net.Dns]::GetHostName()};Invoke-WebRequest -UseBasicParsing -Uri '<ADDRESS>/agent.js' -OutFile $f;claude mcp remove -s user claude-usage 2>$null|Out-Null;claude mcp add -s user claude-usage -e USAGE_URL=<ADDRESS> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<NAME> -e "USAGE_HOST=$h" -- node $f;$env:USAGE_URL='<ADDRESS>';$env:USAGE_KEY='<INGEST_KEY>';$env:USAGE_MEMBER='<NAME>';$env:USAGE_HOST=$h;node $f --once
+$d=Join-Path $env:USERPROFILE '.claude-usage';New-Item -ItemType Directory -Force -Path $d|Out-Null;$f=Join-Path $d 'agent.js';$h=if($env:COMPUTERNAME){$env:COMPUTERNAME}else{[Net.Dns]::GetHostName()};Invoke-WebRequest -UseBasicParsing -Uri '<ADDRESS>/agent.js' -OutFile $f;claude mcp remove -s user claude-usage 2>$null|Out-Null;claude mcp add -s user claude-usage -e USAGE_URL=<ADDRESS> -e USAGE_KEY=<INGEST_KEY> -e USAGE_MEMBER=<NAME> -e "USAGE_HOST=$h" -- node $f;$env:USAGE_URL='<ADDRESS>';$env:USAGE_KEY='<INGEST_KEY>';$env:USAGE_MEMBER='<NAME>';$env:USAGE_HOST=$h;node $f --setup;node $f --once
 ```
 
 Check on the PC, inside Claude Code: `/mcp` lists `claude-usage` as connected, and asking "how much Claude did the team use this week?" makes Claude call `usage_summary`. The dashboard shows the PC as "name · PC-NAME" within a minute of the first session; its history is included.

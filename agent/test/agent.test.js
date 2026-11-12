@@ -481,97 +481,98 @@ test('as an MCP server without a reachable collector: tools still answer, nothin
   } finally { if (!H.gone(a.proc)) a.proc.kill(); }
 });
 
-/* a stand-in for Anthropic's usage endpoint: checks the login header and answers with the two reply shapes */
-function fakeUsageEndpoint(opts) {
-  const http = require('http');
-  const o = Object.assign({ token: 'tok-login', status: 200 }, opts || {});
-  const calls = [];
-  const srv = http.createServer((req, res) => {
-    calls.push({ url: req.url, auth: req.headers.authorization, beta: req.headers['anthropic-beta'] });
-    if (req.headers.authorization !== 'Bearer ' + o.token) { res.writeHead(401, { 'content-type': 'application/json' }); return res.end('{"error":"unauthorized"}'); }
-    if (o.status !== 200) { res.writeHead(o.status); return res.end('{}'); }
-    const soon = new Date(Date.now() + 2 * 3600e3).toISOString();
-    const body = o.unified
-      ? { unifiedWindows: { five_hour: { utilization: 42.44, resetsAt: Math.floor(Date.now() / 1000) + 7200, status: 'allowed' }, seven_day: { utilization: 91, resetsAt: Date.now() + 3 * 86400e3 } }, five_hour: { utilization: 1, resets_at: soon } }
-      : { five_hour: { utilization: 42.44, resets_at: soon }, seven_day: { utilization: 91, resets_at: new Date(Date.now() + 3 * 86400e3).toISOString() }, seven_day_opus: { utilization: 12, resets_at: soon }, seven_day_oauth_apps: null, extra_usage: {} };
-    res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body));
-  });
-  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({ url: 'http://127.0.0.1:' + srv.address().port + '/api/oauth/usage', calls, close: () => new Promise((r) => srv.close(r)) })));
-}
-/* run the agent without blocking this process (the stand-in endpoint must keep serving) */
-function runAgent(args, envVars) {
+/* run the agent without blocking this process */
+function runAgent(args, envVars, stdinText) {
   return new Promise((resolve) => {
-    const proc = spawn(process.execPath, [AGENT].concat(args), { env: envVars, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(process.execPath, [AGENT].concat(args), { env: envVars, stdio: [stdinText === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     proc.stdout.on('data', (d) => { stdout += d; }); proc.stderr.on('data', (d) => { stderr += d; });
     const timer = setTimeout(() => proc.kill('SIGKILL'), 60000);
     proc.on('exit', (code) => { clearTimeout(timer); resolve({ status: code, stdout, stderr }); });
+    if (stdinText !== undefined) proc.stdin.end(stdinText);
   });
 }
-function writeLogin(dir, o) { fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: Object.assign({ accessToken: 'tok-login', refreshToken: 'tok-refresh', expiresAt: Date.now() + 3600e3, scopes: ['user:inference'], subscriptionType: 'max' }, o || {}) })); }
+const statusJson = (o) => JSON.stringify(Object.assign({ hook_event_name: 'Status', session_id: 's', model: { id: 'claude-sonnet-5-5', display_name: 'Sonnet 5.5' }, cost: { total_cost_usd: 1 },
+  rate_limits: { five_hour: { used_percentage: 42.44, resets_at: Math.floor(Date.now() / 1000) + 7800 }, seven_day: { used_percentage: 91, resets_at: Math.floor(Date.now() / 1000) + 3 * 86400 } } }, o || {}));
 
-test('parseWindows reads both reply shapes and clamps', () => {
-  const soon = '2026-11-13T10:00:00.000Z';
-  assert.deepEqual(A.parseWindows({ five_hour: { utilization: 42.44, resets_at: soon }, seven_day: { utilization: '150' }, seven_day_sonnet: { utilization: -3, resets_at: 'never' }, seven_day_opus: null, junk: { utilization: 5 } }),
-    { fiveHour: { pct: 42.4, resetsAt: soon }, sevenDay: { pct: 100, resetsAt: '' }, sevenDaySonnet: { pct: 0, resetsAt: '' } });
-  const u = A.parseWindows({ five_hour: { utilization: 1, resets_at: soon }, unifiedWindows: { five_hour: { utilization: 60, resetsAt: 1794000000 }, seven_day: { utilization: 20, resetsAt: 1794000000000 } } });
-  assert.equal(u.fiveHour.pct, 60); assert.equal(u.fiveHour.resetsAt, new Date(1794000000000).toISOString()); assert.equal(u.sevenDay.resetsAt, new Date(1794000000000).toISOString());
-  assert.deepEqual(A.parseWindows(null), {}); assert.deepEqual(A.parseWindows({ five_hour: { utilization: 'x' } }), {});
+test('parseStatusWindows reads what Claude Code pipes to the status line', () => {
+  const w = A.parseStatusWindows({ five_hour: { used_percentage: 42.44, resets_at: 1794000000 }, seven_day: { used_percentage: '150', resets_at: '2026-11-15T10:00:00Z' }, seven_day_sonnet: { utilization: -3 }, junk: { used_percentage: 5 } });
+  assert.deepEqual(w, { fiveHour: { pct: 42.4, resetsAt: new Date(1794000000000).toISOString() }, sevenDay: { pct: 100, resetsAt: '2026-11-15T10:00:00.000Z' }, sevenDaySonnet: { pct: 0, resetsAt: '' } });
+  assert.equal(A.parseStatusWindows(null), null); assert.equal(A.parseStatusWindows({}), null); assert.equal(A.parseStatusWindows({ five_hour: { used_percentage: 'x' } }), null);
 });
 
-test('the account limits are read from the login and sent; the token stays on the PC', async () => {
+test('as the status line: saves the reading, shows a short line, or runs the status line that was there before', async () => {
+  const st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-')), fx = fixture();
+  const envS = Object.assign({}, process.env, { USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st });
+  let r = await runAgent(['--statusline'], envS, statusJson());
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^Claude limits: 5h 42% \(2h 10m\) · week 91% \(3d 0h\)\n$/);
+  const saved = JSON.parse(fs.readFileSync(path.join(st, 'limits.json'), 'utf8'));
+  assert.equal(saved.windows.fiveHour.pct, 42.4); assert.equal(saved.windows.sevenDay.pct, 91); assert.equal(saved.model, 'Sonnet 5.5'); assert.ok(Date.now() - Date.parse(saved.at) < 10000);
+  /* no rate limits in the document (API-key login, or before the first reply): nothing written, nothing shown */
+  fs.unlinkSync(path.join(st, 'limits.json'));
+  r = await runAgent(['--statusline'], envS, JSON.stringify({ hook_event_name: 'Status', model: { display_name: 'x' } }));
+  assert.equal(r.status, 0); assert.equal(r.stdout, ''); assert.ok(!fs.existsSync(path.join(st, 'limits.json')));
+  r = await runAgent(['--statusline'], envS, 'not json');
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  /* a status line that was there before keeps running, fed the same document */
+  fs.writeFileSync(path.join(st, 'statusline.json'), JSON.stringify({ command: process.execPath + " -e \"let t='';process.stdin.on('data',c=>t+=c).on('end',()=>console.log('prev saw '+JSON.parse(t).model.display_name))\"" }));
+  r = await runAgent(['--statusline'], envS, statusJson());
+  assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, 'prev saw Sonnet 5.5\n');
+  assert.ok(fs.existsSync(path.join(st, 'limits.json')), 'still saved');
+});
+
+test('--setup registers the status line in settings.json and keeps what was there', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  fs.mkdirSync(path.join(dir, 'projects'));
+  const envS = Object.assign({}, process.env, { USAGE_CLAUDE_DIR: dir, USAGE_STATE_DIR: st });
+  let r = await runAgent(['--setup'], envS);
+  assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /^Status line set in .*settings\.json: node ".*agent\.js" --statusline\. Claude Code reads it when it starts\./);
+  let s = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+  assert.deepEqual(s, { statusLine: { type: 'command', command: 'node "' + AGENT + '" --statusline' } });
+  /* an existing settings file with its own status line and other keys */
+  fs.writeFileSync(path.join(dir, 'settings.json'), '﻿' + JSON.stringify({ model: 'sonnet', permissions: { allow: ['Bash(npm test)'] }, statusLine: { type: 'command', command: 'npx ccstatusline@latest', padding: 1 } }));
+  r = await runAgent(['--setup'], envS);
+  assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /your previous status line, npx ccstatusline@latest, keeps running inside it/);
+  s = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+  assert.equal(s.model, 'sonnet'); assert.deepEqual(s.permissions.allow, ['Bash(npm test)']);
+  assert.deepEqual(s.statusLine, { type: 'command', command: 'node "' + AGENT + '" --statusline', padding: 1 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(st, 'statusline.json'), 'utf8')).command, 'npx ccstatusline@latest');
+  /* running it again changes nothing and does not overwrite the saved previous line with our own */
+  r = await runAgent(['--setup'], envS);
+  assert.equal(r.status, 0); assert.deepEqual(JSON.parse(fs.readFileSync(path.join(st, 'statusline.json'), 'utf8')).command, 'npx ccstatusline@latest');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).statusLine.command, 'node "' + AGENT + '" --statusline');
+});
+
+test('the status line’s reading reaches the collector; without one the agent says so', async () => {
   const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
-  const ep = await fakeUsageEndpoint();
   const fx = fixture(), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
-  writeLogin(fx.dir);
-  const envL = (extra) => env(col, Object.assign({ USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st, USAGE_LIMITS_URL: ep.url }, extra || {}));
-  let ep2 = null;
+  const envL = (extra) => env(col, Object.assign({ USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st }, extra || {}));
   try {
     let r = await runAgent(['--once'], envL());
-    assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /Account limits sent too\.$/m);
-    assert.equal(ep.calls.length, 1); assert.equal(ep.calls[0].beta, 'oauth-2025-04-20'); assert.equal(ep.calls[0].url, '/api/oauth/usage');
-    const u = (await H.get(col.url + '/api/usage' + K)).json;
-    assert.equal(u.account.plan, 'max'); assert.equal(u.account.windows.fiveHour.pct, 42.4); assert.equal(u.account.windows.sevenDay.pct, 91); assert.equal(u.account.windows.sevenDayOpus.pct, 12);
-    assert.equal(u.account.byLabel, 'Harsh Patel · DESKTOP-1');
-    const everything = r.stdout + r.stderr + fs.readFileSync(path.join(st, 'state.json'), 'utf8');
-    assert.ok(everything.indexOf('tok-login') < 0 && everything.indexOf('tok-refresh') < 0, 'no token in output or state');
-    /* status and the summary tool mention it */
+    assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /Account limits: no reading yet: Claude Code gives one to the status line after its first reply/);
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.account, null);
+    await runAgent(['--statusline'], envL(), statusJson());
+    r = await runAgent(['--once'], envL());
+    assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /Account limits sent too\.$/m);
+    let u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u.account.windows.fiveHour.pct, 42.4); assert.equal(u.account.windows.sevenDay.pct, 91); assert.equal(u.account.byLabel, 'Harsh Patel · DESKTOP-1'); assert.equal(u.account.plan, '');
+    /* the same reading is not sent again; a newer one is */
+    r = await runAgent(['--once'], envL());
+    assert.ok(!/Account limits sent too/.test(r.stdout), r.stdout);
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.limitHistory.length, 1);
+    await runAgent(['--statusline'], envL(), statusJson({ rate_limits: { five_hour: { used_percentage: 50, resets_at: Math.floor(Date.now() / 1000) + 100 }, seven_day: { used_percentage: 92, resets_at: Math.floor(Date.now() / 1000) + 100 } } }));
+    r = await runAgent(['--limits'], envL());
+    assert.equal(r.status, 0, r.stdout); assert.match(r.stdout, /^Sent to the collector\. Account limits \(from the status line, read .*\): 5-hour window 50% used, resets .*; weekly 92% used/);
+    u = (await H.get(col.url + '/api/usage' + K)).json;
+    assert.equal(u.account.windows.fiveHour.pct, 50); assert.equal(u.limitHistory.length, 2);
     const status = await runAgent(['--status'], envL());
-    assert.match(status.stdout, /Account limits: not read yet\./, 'a fresh process has not read them');
-    const lim = await runAgent(['--limits'], envL());
-    assert.equal(lim.status, 0, lim.stdout + lim.stderr); assert.match(lim.stdout, /^Sent to the collector\. Account limits \(max plan\): 5-hour window 42\.4% used, resets .*; weekly 91% used/);
+    assert.match(status.stdout, /Account limits \(from the status line, read .*\): 5-hour window 50% used/);
     const sum = await runAgent(['--summary'], envL());
-    assert.match(sum.stdout, /Account limits, max plan, for the whole account including claude.ai chats: 5-hour window 42\.4% used \(resets .*\); weekly 91% used/);
-    /* the newer reply shape */
-    ep2 = await fakeUsageEndpoint({ unified: true });
-    r = await runAgent(['--limits'], envL({ USAGE_LIMITS_URL: ep2.url }));
-    assert.equal(r.status, 0, r.stdout);
-    const u2 = (await H.get(col.url + '/api/usage' + K)).json;
-    assert.equal(u2.account.windows.fiveHour.pct, 42.4); assert.equal(u2.account.windows.sevenDay.pct, 91); assert.equal(u2.account.windows.sevenDayOpus, undefined);
-  } finally { await ep.close(); if (ep2) await ep2.close(); await col.stop(); }
-});
-
-test('limits are skipped cleanly: no login, expired login, refused login, switched off', async () => {
-  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
-  const ep = await fakeUsageEndpoint();
-  const fx = fixture(), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
-  const envL = (extra) => env(col, Object.assign({ USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st, USAGE_LIMITS_URL: ep.url }, extra || {}));
-  try {
-    let r = await runAgent(['--once'], envL());
-    assert.equal(r.status, 0); assert.match(r.stdout, /Account limits not sent: no claude.ai login found in Claude Code on this PC\./);
-    writeLogin(fx.dir, { expiresAt: Date.now() - 1000 });
-    r = await runAgent(['--once'], envL());
-    assert.equal(r.status, 0); assert.match(r.stdout, /Account limits not sent: the login token has expired/); assert.equal(ep.calls.length, 0);
-    writeLogin(fx.dir, { expiresAt: Math.floor(Date.now() / 1000) + 3600 }); /* seconds, as some writers use */
-    r = await runAgent(['--once'], envL());
-    assert.match(r.stdout, /Account limits sent too\./); assert.equal(ep.calls.length, 1);
-    writeLogin(fx.dir, { accessToken: 'tok-wrong' });
-    r = await runAgent(['--once'], envL());
-    assert.equal(r.status, 0); assert.match(r.stdout, /Account limits not sent: the usage endpoint refused the login \(401\)/);
+    assert.match(sum.stdout, /Account limits, for the whole account including claude.ai chats: 5-hour window 50% used \(resets .*\); weekly 92% used/);
     r = await runAgent(['--once'], envL({ USAGE_LIMITS: '0' }));
-    assert.equal(r.status, 0); assert.ok(!/Account limits/.test(r.stdout), r.stdout);
-    assert.equal(ep.calls.length, 2);
-    assert.equal((await H.get(col.url + '/api/usage' + K)).json.account.windows.fiveHour.pct, 42.4, 'the good reading stays');
-  } finally { await ep.close(); await col.stop(); }
+    assert.ok(!/Account limits/.test(r.stdout), r.stdout);
+    const everything = fs.readFileSync(path.join(st, 'state.json'), 'utf8');
+    assert.ok(everything.indexOf('rate_limits') < 0, 'the state file does not carry status-line documents');
+  } finally { await col.stop(); }
 });
