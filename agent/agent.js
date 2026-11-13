@@ -22,15 +22,18 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const env = process.env;
 const URL_BASE = (env.USAGE_URL || '').trim().replace(/\/+$/, '');
 const KEY = (env.USAGE_KEY || '').trim();
 const READ_KEY = (env.USAGE_READ_KEY || '').trim() || KEY;
 /* names arrive percent-encoded from the install command (no quoting trouble in PowerShell or bash); decode them */
 function pct(s) { if (!/%[0-9a-f]{2}/i.test(s)) return s; try { return decodeURIComponent(s); } catch (e) { return s; } }
-const MEMBER = pct(env.USAGE_MEMBER || '').replace(/\s+/g, ' ').trim().slice(0, 60) || safeUser();
-const HOST = pct(env.USAGE_HOST || '').replace(/\s+/g, ' ').trim().slice(0, 60) || os.hostname().split('.')[0];
+/* who this PC reports as: from the environment, else what the state file remembers, else the Windows/OS user name */
+const MEMBER_GIVEN = pct(env.USAGE_MEMBER || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+const HOST_GIVEN = pct(env.USAGE_HOST || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+let MEMBER = MEMBER_GIVEN || safeUser();
+let HOST = HOST_GIVEN || os.hostname().split('.')[0];
 /* where the logs are: USAGE_CLAUDE_DIR or CLAUDE_CONFIG_DIR (comma-separated), else ~/.claude and ~/.config/claude like ccusage */
 const ROOTS_GIVEN = (env.USAGE_CLAUDE_DIR || env.CLAUDE_CONFIG_DIR || '').split(',').map((s) => s.trim()).filter(Boolean);
 const CLAUDE_ROOTS = ROOTS_GIVEN.length ? ROOTS_GIVEN : [path.join(os.homedir(), '.claude'), path.join(env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'claude')];
@@ -48,8 +51,9 @@ const MAX_SESSIONS = 1000, TAIL = 16, MIN_DATE = '2024-01-01', FREEZE_AFTER_DAYS
 
 function safeUser() { try { return os.userInfo().username; } catch (e) { return 'unknown'; } }
 function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'member'; }
-const MEMBER_ID = slug(MEMBER) + '@' + HOST.toLowerCase();
-const LABEL = MEMBER.toLowerCase() === HOST.toLowerCase() ? MEMBER : MEMBER + ' · ' + HOST; /* as the dashboard shows it */
+let MEMBER_ID = '', LABEL = '';
+function identity() { MEMBER_ID = slug(MEMBER) + '@' + HOST.toLowerCase(); LABEL = MEMBER.toLowerCase() === HOST.toLowerCase() ? MEMBER : MEMBER + ' · ' + HOST; } /* as the dashboard shows it */
+identity();
 function log() { process.stderr.write(new Date().toISOString() + ' claude-usage: ' + Array.prototype.join.call(arguments, ' ') + '\n'); }
 
 /* ---------- time ---------- */
@@ -65,7 +69,7 @@ function daysAgo(n, zone) { return dayOf(Date.now() - n * 86400000, zone); }
 
 /* ---------- state ---------- */
 function emptyState() {
-  return { v: 2, url: URL_BASE, member: MEMBER_ID, token: '', tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, frozenDays: [], retract: null, zeroRows: [], limitsSentFor: '',
+  return { v: 2, url: URL_BASE, member: MEMBER_ID, memberName: MEMBER, host: HOST, token: '', tz: '', files: {}, days: {}, sessions: {}, sessDays: {}, ledgers: {}, frozenDays: [], retract: null, zeroRows: [], limitsSentFor: '',
     dirtyDays: [], dirtySessions: [], full: true, lastActivity: '', lastScan: '', lastSync: '', lastSyncOk: '', lastError: '', fails: 0, nextTry: 0, sent: 0 };
 }
 let state = emptyState();
@@ -83,7 +87,11 @@ function loadState() {
   let loaded = false;
   try {
     const o = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (o && o.v === 2 && o.days && o.files) { state = Object.assign(emptyState(), o); loaded = true; }
+    if (o && o.v === 2 && o.days && o.files) {
+      /* a run without USAGE_MEMBER (a check by hand) keeps reporting as the person the install named */
+      if (!MEMBER_GIVEN && typeof o.memberName === 'string' && o.memberName) { MEMBER = o.memberName; if (!HOST_GIVEN && typeof o.host === 'string' && o.host) HOST = o.host; identity(); }
+      state = Object.assign(emptyState(), o); loaded = true;
+    }
     else if (o && o.v === 1) { log('state file from an older agent, counting again'); }
   } catch (e) { if (e.code !== 'ENOENT') log('state file unreadable, starting over:', e.message); }
   if (!loaded) state = emptyState();
@@ -93,6 +101,7 @@ function loadState() {
     if (loaded) log('collector or name changed: everything will be sent again');
     state.url = URL_BASE; state.member = MEMBER_ID; state.token = ''; markAllDirty();
   }
+  state.memberName = MEMBER; state.host = HOST;
   if (!state.token) state.token = makeToken();
   return loaded;
 }

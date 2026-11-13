@@ -304,6 +304,24 @@ test('a renamed person or a new collector gets the whole history, not only new d
   } finally { await col.stop(); }
 });
 
+test('a run without USAGE_MEMBER keeps the name the install gave', async () => {
+  const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
+  const fx = fixture(), st = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  try {
+    assert.equal(once(col, fx, st).status, 0);
+    const bare = Object.assign({}, process.env, { USAGE_URL: col.url, USAGE_KEY: 'ingest-secret-1234', USAGE_CLAUDE_DIR: fx.dir, USAGE_STATE_DIR: st });
+    delete bare.USAGE_MEMBER; delete bare.USAGE_HOST;
+    const s = spawnSync(process.execPath, [AGENT, '--status'], { env: bare, encoding: 'utf8' });
+    assert.match(s.stdout, /Reporting as “Harsh Patel · DESKTOP-1” \(id harsh-patel@desktop-1\)/); assert.ok(!/collector or name changed/.test(s.stderr), s.stderr);
+    const r = spawnSync(process.execPath, [AGENT, '--once'], { env: bare, encoding: 'utf8' });
+    assert.match(r.stdout, /0 new API calls\)\. Not sent: nothing new/);
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.members.length, 1, 'no second member was created');
+    /* a name given in the environment still wins */
+    assert.equal(once(col, fx, st, { USAGE_MEMBER: 'other' }).status, 0);
+    assert.equal((await H.get(col.url + '/api/usage' + K)).json.members.length, 2);
+  } finally { await col.stop(); }
+});
+
 test('two installations with the same name and PC: the second is refused with a clear message', async () => {
   const col = await H.start({ DATA_DIR: H.tmpdir(), REPORT_TZ: 'UTC' });
   const fx = fixture(), st1 = fs.mkdtempSync(path.join(os.tmpdir(), 'st-')), st2 = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
